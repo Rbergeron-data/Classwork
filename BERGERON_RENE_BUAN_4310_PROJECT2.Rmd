@@ -1,0 +1,2086 @@
+---
+title: Project 2
+author: Rene Bergeron
+date: Nov 19, 2025
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    collapsed: false
+    theme: united
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+#initialize
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(stats)
+library(ROSE)
+library(plotly)
+
+```
+
+# 1. Load Data
+
+In this section, we will load the dataset required for the analysis.
+
+```{r}
+HouseDF <- read.csv("house_15.csv")
+
+str(HouseDF)
+```
+
+*Interpretation*: Once the data is loaded, ensure to examine its structure to ensure everything is in order before moving forward. Explain briefly what each dataset column represents, using layman's terms where necessary. For example: "This dataset includes customer data such as age, income, and purchase behaviour."
+
+
+# 2. Exploratory Data Analysis and Variable explanations
+
+This dataset includes house sale information such as physical
+information, historical information \## Sales Information:
+
+### -PRICE
+
+This is my target variable. I will construct one regression and one
+classification model for predictions.
+
+```{r}
+summary(HouseDF$price)
+```
+
+That is a pretty large range, definitely some outliers.(Extraordinary
+Values) Based on domain knowledge, I'm guessing some of these sales were
+land and some are massive estates. Far from the ordinary sale you might
+be expecting
+
+First step is checking the viability of removing based on the
+Statistical method of IQR. This method dicates that anything outside of
+1.5 times the middle 50% above or below is considered an outlier. I will
+apply this method if dataloss are minimal
+
+```{r}
+price_limits <- list(
+  quantile(
+    HouseDF$price,
+    .25) - ( 1.5*IQR(HouseDF$price) ) ,
+  quantile(
+    HouseDF$price,
+    .75) + ( 1.5*IQR(HouseDF$price) )
+  )
+
+
+HouseDFfilter <- HouseDF %>%
+  filter(
+    price >= price_limits[1] &
+      price <= price_limits[2]
+  )
+
+outliers_HouseDF <- HouseDF %>%
+  filter(
+    price >= price_limits[1] &
+      price <= price_limits[2]
+  )
+    
+
+
+dataloss <- (nrow(HouseDF) - nrow(HouseDFfilter)) / nrow(HouseDF)
+dataloss
+
+```
+
+Dataloss are minimal (barely over 5%), therefore I will continue forward
+with the outliers removed.
+
+```{r}
+working_HouseDF <- HouseDFfilter
+rm(
+  HouseDFfilter,
+  dataloss,
+  outliers_HouseDF
+)
+
+summary(working_HouseDF$price)
+```
+
+Our minimum price prediction hasn't changed, but now the model is
+restricted to houses \<= \$1,110,000
+
+### -year
+
+Year of Sale
+
+```{r}
+summary(HouseDF$Year)
+t.test(price ~ as.factor(Year), data = HouseDF)
+```
+
+This dataset is for sales in 2014 and 2015 The data do not support that
+the two years had different average prices.
+
+### -month
+
+Month of Sale (January = 1)
+
+Lets explore for popular months:
+
+```{r}
+MONTH_histogram <- ggplot(data = working_HouseDF) +
+  geom_histogram(aes(x= Month))
+MONTH_histogram
+```
+
+It sure looks like the peak sales occur between April - August. Sales
+are higher than the rest of the year. There is also visual growth and
+decline of volume leading up to and following what I am calling peak
+season. I am considering a VARIABLE to explain a "peak season price
+multiplier"
+
+```{r}
+working_HouseDF <- working_HouseDF %>%
+  mutate( peak = case_when(Month < 4 | 
+                             Month > 8 ~ "False",
+                           Month >= 4 & 
+                             Month <= 8 ~ "True"))
+str(working_HouseDF$peak)
+working_HouseDF$peak <- as.factor(working_HouseDF$peak)
+
+t.test(price ~ peak,
+       data = working_HouseDF)
+```
+
+The difference in means is not zero, and as I suspected, the average
+price for houses sold during peak season is higher than those sold
+during non-peak season. Peak Season Average: \$481,897 Non-Peak Season
+Average: \$468,949
+
+I will likely use the peak season variable in my model.
+
+```{r}
+rm(MONTH_histogram)
+```
+
+### -day
+
+Day of the Month of the Sale
+
+Same thing, let's check for trends during the month:
+
+```{r}
+DAY_histogram <- ggplot(data = working_HouseDF) +
+  geom_histogram(aes(x= Day))
+DAY_histogram
+
+```
+
+There is a noticeable peak around the 15th, but the rest of the data
+show no discernible pattern
+
+I will likely NOT use dayof the month in my model
+
+```{r}
+rm(DAY_histogram)
+```
+
+### -day of week
+
+Day of the Week of the Sale (assuming Sunday = 1)
+
+Checking for trends:
+
+```{r}
+DAYOFWK_histogram <- ggplot(data = working_HouseDF) +
+  geom_histogram(aes(x= day_of_week))
+DAYOFWK_histogram
+```
+
+Very clearly a pattern of few home sales on weekends. Lets see if it
+affects price:
+
+```{r}
+working_HouseDF <- working_HouseDF %>%
+  mutate(
+    weekend = case_when(
+      day_of_week <= 5 ~ "False",
+      day_of_week >5 ~ "True"
+    )
+  )
+str(working_HouseDF$weekend)
+working_HouseDF$weekdend <- as.factor(working_HouseDF$weekend)
+
+t.test(price ~ weekend,
+       data = working_HouseDF)
+```
+
+There are not enough data to support houses sold on the weekend are sold
+at a different price.
+
+I will likely NOT use day of week in my model
+
+```{r}
+rm(DAYOFWK_histogram)
+```
+
+## Physical:
+
+### -bedrooms
+
+number bedrooms
+
+```{r}
+cor(working_HouseDF$price,
+    working_HouseDF$bedrooms)
+```
+
+There is weak relationship between bedrooms and price
+
+Based on domain knowledge, I will group these houses into clusters based
+on the number of bedrooms. My knowledge of Seattle living expenses
+understands that price relationships are not linear and are often
+stepped at each number of bedrooms. Example, a 1 bedroom to a 2 bedroom
+with everything else equal would sell for a drastically different
+amount.
+
+Converting to a factor type because it is can be either a discrete or a
+continuous variable.
+
+```{r}
+working_HouseDF$bedrooms <- as.factor(working_HouseDF$bedrooms)
+summary(working_HouseDF$bedrooms)
+```
+
+There is a single data point with 33 bedrooms. It sold for \$640,000, so
+I am assuming this is a typo and it is a 3-bedroom. Since I do not have
+deeper information about the homesale, I must remove the suspected
+invalid datapoint.
+
+The data points with 0 bedrooms are likely office spaces as most of them
+have several floors but did not sell for very high prices. They vary in
+number of bathrooms, and size, but I will remove them as we are
+interested in houses, not presumed office spaces. Since it is not
+considered a house with 0 bedrooms, I will exclude these observations.
+
+```{r}
+
+
+working_HouseDF <- working_HouseDF %>%
+  mutate( bedrooms = as.character(bedrooms)) %>%
+  mutate( bedrooms = as.numeric(bedrooms)) %>%
+  filter(
+    bedrooms <= 11 &
+      bedrooms != 0 ) %>%
+  mutate( bedrooms = as.factor(bedrooms) )
+
+
+summary(working_HouseDF$bedrooms)
+
+BEDROOMS_bar <- ggplot(data = working_HouseDF) +
+  geom_bar(aes(
+    x= bedrooms
+  ))
+
+BEDROOMS_bar
+```
+
+I removed 7 / 14,252 obervations. This is a .04% data loss. Perfectly
+acceptable and necessary.
+
+Again, we are seeing a large skew in the data. To create more useful and
+accurate results, I am going to factorize the bedrooms and group any
+
+```{r}
+working_HouseDF <- working_HouseDF %>%
+  mutate( bedrooms = as.character(bedrooms) ) %>%
+  mutate( bedrooms = as.numeric(bedrooms) ) %>%
+  mutate( bedrooms = case_when(
+    bedrooms > 5 ~ "more_than_5",
+    .default = as.character(bedrooms)
+    )
+  ) %>%
+  mutate(
+    bedrooms = as.factor(bedrooms)
+  )
+summary(working_HouseDF$bedrooms)
+
+BEDROOMS_bar <- ggplot(data = working_HouseDF) +
+  geom_bar(aes(
+    x=bedrooms
+  ))
+
+BEDROOMS_bar
+str(working_HouseDF$bedrooms)
+
+```
+
+Now the data look more normally distributed which make for much more
+accurate models.
+
+```{r}
+rm(BEDROOMS_bar)
+```
+
+Let's use a statistical test to confirm there is a difference in
+variance between the bedroom groups.
+
+```{r}
+anova <- aov( price ~ bedrooms ,
+              data = working_HouseDF)
+summary(anova)
+```
+
+This confirms they have different average prices because the f-test came
+back almost zero. Basically saying that not all the bedgroom groups have
+the same average. Next we run another statistical test called "Honest
+Significant Difference" This goes the next step from the analysis of
+variance I just ran, and will test pairs of groups to determine which
+ones are different, this will help me cluster potentially similar
+groups.
+
+```{r}
+TukeyHSD(anova)
+```
+
+The only pair that doesn't have a reliable difference in average price
+is houses with more than 5 and houses with 5 bedrooms. The results of
+the Honest Significant Difference leads me to potentially grouping the
+two.
+
+```{r}
+library(forcats)
+summary(working_HouseDF$bedrooms)
+
+working_HouseDF <- working_HouseDF %>%
+  mutate(
+    bedrooms = fct_collapse(
+      .f = bedrooms,
+      "5_plus" = c("5", "more_than_5")
+      )
+    )
+
+levels(working_HouseDF$bedrooms)
+
+BEDROOMS_bar <- ggplot(working_HouseDF) +
+  geom_bar(
+    aes(
+      x=bedrooms
+    )
+  )
+BEDROOMS_bar
+
+anova <- aov(price ~ bedrooms,
+             data = working_HouseDF)
+summary(anova)
+
+TukeyHSD(anova)
+```
+
+Now we have 5 levels of bedrooms all testing as statistically different
+average prices.
+
+I will likely use bedrooms in my model
+
+```{r}
+rm(BEDROOMS_bar,
+   anova)
+```
+
+### -bathrooms
+
+number of bathrooms
+
+```{r}
+cor(working_HouseDF$price,
+    working_HouseDF$bathrooms)
+
+BATHROOMS_histogram <- ggplot(working_HouseDF) +
+  geom_histogram(
+    aes(
+      x= bathrooms
+    )
+  )
+BATHROOMS_histogram
+```
+
+There is strong correlation between bathrooms and price.
+
+I will likely use this in my model.
+
+```{r}
+rm(BATHROOMS_histogram)
+```
+
+EXPLORE ACCURACY OF SQFT LISTINGS FOR POTENTIAL USAGE OF UPPER v LOWER
+SQFT INSTEAD OF TOTAL SQUARE FOOTAGE If the data are accurate for above
+and below square footage, all the above and below should add up to their
+respective sqft living
+
+### -sqft_living
+
+square footage of the house
+
+### -sqft_above
+
+square footage of above ground floors
+
+###-sqft_basement square footage of the basement
+
+```{r}
+sqftDF <- working_HouseDF %>%
+  select(sqft_living,
+         sqft_above,
+         sqft_basement,
+         price) %>%
+  rename(sqft_living_listed = sqft_living) %>%
+  mutate(sqft_living_calculated = sqft_above + sqft_basement) %>%
+  select(sqft_living_listed,
+         sqft_living_calculated,
+         price) %>%
+  mutate(diff_listed_V_calculated = sqft_living_listed - sqft_living_calculated)
+summary(sqftDF$diff_listed_V_calculated)
+```
+
+Good to go (seems fishy haha). The data is perfectly accurate in its
+division of sqft. This means I may use the above and below sqft to
+explain price differences.
+
+```{r}
+rm(sqftDF)
+```
+
+Now to explore the potential relationship between overall sqft and the
+price, then I will explore what a ratio of above and below sqft does to
+the relationship.
+
+```{r}
+cor(working_HouseDF$price , working_HouseDF$sqft_living)
+```
+
+A correlation of .62 is extremely high. This strongly suggests using
+sqft_living as a variable. Now I will check the ratios
+
+```{r}
+sqft_ratios <- working_HouseDF %>%
+  mutate( ratio_above = sqft_above / sqft_living)
+summary(sqft_ratios$ratio_above)
+
+```
+
+This TRANSFORMATION is interpreted as follows: ratio_above = 1 means
+that the property does not have any basement.
+
+```{r}
+cor(sqft_ratios$price, sqft_ratios$ratio_above)
+```
+
+This weak negative correlation between price and ratio above indicates
+that houses with basements sell for more than those without. Instead of
+using a ratio to determine the effect, I will add a discrete variable
+indicating whether or not the property has a basement:
+
+```{r}
+working_HouseDF <- working_HouseDF %>%
+  mutate( basement = 
+            case_when(
+              sqft_basement != 0 ~ "True",
+              sqft_basement == 0 ~ "False"
+            ),
+          ratio_above = sqft_above/sqft_living
+          )
+rm(sqft_ratios)
+```
+
+Now we check its significance:
+
+```{r}
+t.test(price ~ basement,
+       data = working_HouseDF)
+```
+
+This confirms my suspicions. Although the correlation between the ratio
+of above-ground sqft and price is not very strong, the negative
+correlation there indicates the same inverse relationship indicated
+here. The difference in average prices for houses with vs without
+basements indicates the same relationship. Houses in Seattle sell for
+more if they have a basement.
+
+I may use any combination of living sqft to predict price.
+
+### -sq_ft_lot
+
+square footage of the lot
+
+```{r}
+summary(working_HouseDF$sqft_lot)
+```
+
+Sheesh, that is a very large range, but luckily all are valid values.
+
+I doubt it, but let's check IQR:
+
+```{r}
+working_HouseDF_filtered <- working_HouseDF %>%
+  filter(sqft_lot >= quantile(sqft_lot, 
+                              .25) - ( 1.5 * IQR(sqft_lot)
+                                       ) &
+           sqft_lot <= quantile(sqft_lot,
+                                .75) + ( 1.5 * IQR(sqft_lot)
+                                         )
+         )
+
+```
+
+IQR removed too many outliers, lets see what those outliers might have
+in common:
+
+```{r}
+working_HouseDF_outliers <- working_HouseDF %>%
+  filter(sqft_lot <= quantile(sqft_lot, 
+                              .25) - ( 1.5 * IQR(sqft_lot)
+                                       ) |
+           sqft_lot >= quantile(sqft_lot,
+                                .75) + ( 1.5 * IQR(sqft_lot)
+                                         )
+         )
+
+```
+
+I notice no noteable trends or patterns on glancing at the dataframe. To
+consider using thisvariable in the model, I will perform a log
+transformation on it. A log transformation will decrease the range of
+the data and thus decrease the effect of the more extreme values on my
+prediction.
+
+```{r}
+working_HouseDF <- working_HouseDF %>%
+  mutate( LOG_sqft_lot = log(sqft_lot)) %>%
+  select(-weekend)
+
+rm(
+  working_HouseDF_filtered,
+  working_HouseDF_outliers
+)
+```
+
+This transformation changes our interpretation of the effects of changes
+to lot size. If using the log transformed variable in the model, changes
+in lot size must be compared as a percentage change from a similar
+house.
+
+Similar to the living sqft, I will compare the lot size with correlation
+to the price:
+
+```{r}
+cor(working_HouseDF$price, working_HouseDF$LOG_sqft_lot)
+```
+
+This is a very weak correlation at 10% but does suggest that properties
+with more lot size do sell for more. Lets check something with the lot
+sizes really quick. I think there may be a relationship between lot
+sizes and their living sqft. My goal is to determine if properties with
+land (more lot size than living sqft) sell at a different price rate:
+
+```{r}
+living_V_lot_SQFT <- working_HouseDF %>%
+  select(sqft_living,
+         sqft_lot,
+         price) %>%
+  mutate(diff_living_V_lot = sqft_lot - sqft_living)
+summary(living_V_lot_SQFT$diff_living_V_lot)
+nrow(living_V_lot_SQFT$diff_living_V_lot == 0)
+```
+
+I am confused by the negative values and there are no 0 values, so I do
+not have clear enough information regarding how each of these values are
+measured/recorded. I will not continue further exploration of the
+relationship between lot size and living sqft
+
+```{r}
+rm(
+  living_V_lot_SQFT
+)
+```
+
+I will likely NOT use sqft_lot in the model due to its very weak
+correlation
+
+### -floors
+
+total number of floors in the house
+
+```{r}
+summary(working_HouseDF$floors)
+unique(working_HouseDF$floors)
+```
+
+I am unsure what a half floor is in this dataset as it is not specified.
+The best I can do is treat the variable as continuous even if it may be
+more advantageous to treat it as discrete.
+
+```{r}
+cor(working_HouseDF$price,
+    working_HouseDF$floors)
+```
+
+A positive correlation of .27 means there is a weak positive correlation
+between price and the number of floors. I may use this variable in the
+model.
+
+### -waterfront
+
+whether the house has a view to the waterfront
+
+```{r}
+t.test(price ~ waterfront,
+       data = working_HouseDF)
+```
+
+As anticipated, houses with waterfront views sell for much higher
+prices.
+
+### -view
+
+How many times the house had been viewed at point of data collection.
+
+```{r}
+summary(working_HouseDF$view)
+
+viewDF <- working_HouseDF %>%
+  select(
+    view,
+    price
+  ) %>%
+  mutate( first_view_sale = case_when(
+    view < 1 ~ "True",
+    view >= 1 ~ "False"
+  )) %>%
+  mutate( first_view_sale = as.factor(first_view_sale))
+
+cor(viewDF$price, viewDF$view)
+
+t.test(price ~ first_view_sale,
+       data = viewDF)
+```
+
+Both the correlation, and the difference in means confirms that more
+viewers increases the selling price. It's likely that more viewers leads
+to more offers.
+
+I will likely use one of these two variables in my model.
+
+```{r}
+rm(viewDF)
+```
+
+### -condition
+
+overall condition of the house (1-5, 5 is best)
+
+```{r}
+cor(working_HouseDF$price,
+    working_HouseDF$condition)
+```
+
+There is extremely weak correlation between condition and price.
+
+I will likely NOT use this variable in my model.
+
+### -grade
+
+King County assessed house condition grade. Higher = better
+
+```{r}
+cor(working_HouseDF$price,
+    working_HouseDF$grade)
+```
+
+Again a very weak correlation between price and grade.
+
+I will likely NOT use this variable in my model.
+
+### -zipcode
+
+zip code of the property Based on domain knowledge, I suspect that
+houses in Seattle proper (Seattle zip code) sell for higher prices.
+
+```{r}
+Seattle_Zips <- c("98101","98102","98103","98104","98105",
+                     "98106","98107","98108","98109","98111",
+                     "98112","98113","98114","98115","98116",
+                     "98117","98118","98119","98121","98122",
+                     "98124","98125","98126","98133","98134",
+                     "98136","98144","98146","98154","98161",
+                     "98174","98177","98178","98199")
+
+str(Seattle_Zips)
+
+working_HouseDF <- working_HouseDF %>%
+  mutate( zipcode = as.character(working_HouseDF$zipcode)) %>%
+  mutate( Seattle = case_match(
+    zipcode, 
+    Seattle_Zips ~ "True",
+    .default = "False"
+  )) %>%
+  mutate( Seattle = as.factor(Seattle))
+
+str(working_HouseDF)
+
+```
+
+Checking hypothesis:
+
+```{r}
+t.test(price ~ Seattle,
+       data = working_HouseDF)
+```
+
+My hypothesis is true, Seattle houses have a higher average sale price.
+
+I will likely use this variable instead of zipcode.
+
+### -lat
+
+Latitude coordinate of the house This is another location based
+indicator, but would not provide meaningful analysis
+
+### -long
+
+longitude coordinate of the house This is another location based
+indicator, but would not provide meaningful analysis.
+
+I will NOT use zip, lat, or long in my model
+
+Historical:
+
+### -yr_built
+
+year the house was built
+
+```{r}
+summary(working_HouseDF$yr_built)
+
+
+cor(working_HouseDF$price,
+    working_HouseDF$yr_built)
+```
+
+There is very weak correlation between year built and price.
+
+I will likely NOT use yr_built in my model.
+
+### -yr_renovated
+
+year the house was renovated
+
+```{r}
+summary(working_HouseDF$yr_renovated)
+
+cor(working_HouseDF$price,
+    working_HouseDF$yr_renovated)
+```
+
+There is slightly stronger correlation between price and yr_renovated
+
+I notice the majority of houses have not had renovations as indicated by
+a 0. It may be useful to treat this as a dummy variable as to whether or
+not the house has had a renovation.
+
+```{r}
+RenovatedDF <- working_HouseDF %>%
+  select(yr_renovated,
+         price) %>%
+  mutate( renovated = case_when(
+    yr_renovated != 0 ~ "True",
+    .default = "False"
+  )) %>%
+  mutate( renovated = as.factor(renovated))
+
+t.test( price ~ renovated,
+        data = RenovatedDF)
+```
+
+This concludes that houses with renovations sell for higher prices.
+
+I may use this variable in my model.
+
+```{r}
+rm(RenovatedDF)
+```
+
+
+# 3. Data Preprocessing
+
+
+## Transformations
+
+Perform data cleaning, such as handling missing values, transforming variables, or creating new features.
+
+### First, narrow down the dataset into just the variables I may use:
+```{r}
+working_HouseDF <- working_HouseDF %>%
+  select(bedrooms,
+         bathrooms,
+         sqft_living,
+         sqft_above,
+         sqft_basement,
+         sqft_lot,
+         floors,
+         waterfront,
+         view,
+         zipcode,
+         yr_built,
+         yr_renovated,
+         Month,
+         Year,
+         price)
+str(working_HouseDF)
+```
+The variable narrowing and transformations up to this point have been discussed in the exploratory data analysis.
+
+### Redoing some earlier transformations for the model.
+
+```{r}
+working_HouseDF <- working_HouseDF %>%
+  mutate(
+    ratio_sqft_above = sqft_above / sqft_living ,
+    peak_volume_season = case_when(
+      Month < 4 |
+        Month > 8 ~ "False" ,
+      .default = "True"
+      ),
+    first_view_sale = case_when(
+      view < 1 ~ "True",
+      .default = "False"
+      ), 
+    Seattle = case_match(
+      zipcode,
+      Seattle_Zips ~ "True",
+      .default = "False"
+      ),
+    basement = case_when(
+      sqft_basement != 0 ~ "True",
+      .default = "False"
+    ),
+    log_sqft_lot = log(sqft_lot),
+    renovated = case_when(
+      yr_renovated !=0 ~ "True",
+      .default = "False"
+    )
+    ) %>%
+  mutate(
+    across(
+      c(peak_volume_season, first_view_sale, Seattle, basement, waterfront,
+        zipcode, renovated),
+      as.factor
+    )
+  ) %>%
+  mutate(
+    across(
+      c(bathrooms, sqft_living, sqft_above, sqft_basement,
+        sqft_lot, floors, view, yr_built, yr_renovated,
+        Month, Year, price, log_sqft_lot),
+      as.numeric  )
+    )
+
+str(working_HouseDF)
+```
+
+
+### reselect in better order based on correlation with price at the end
+```{r}
+cormat <- working_HouseDF%>%
+  select(where(is.numeric))
+cor(cormat)
+```
+
+*Interpretation*: My cleaning, manipulations, and translations are described alongside their manipulations
+
+## Select variables.
+```{r}
+working_HouseDF <- working_HouseDF %>%
+  select(sqft_living, sqft_above, bathrooms, floors,
+         sqft_basement, view, ratio_sqft_above, log_sqft_lot, bedrooms, 
+         renovated, waterfront, peak_volume_season, first_view_sale, Seattle, 
+         basement,  price
+         )
+str(working_HouseDF)
+
+rm(cormat,
+   HouseDF)
+```
+
+*Interpretation*: My reasoning for selection is outlined throughout the exploratory data anlysis and transformations processes. I have a handful of "spare" variables that I may swap in and out with each other to get the best linear regression to build my model on. 
+groupings of variables selected 
+Living Space:
+    These may only be used in certain combinations as some of them are components of the others. 
+  Basement Square Footage - sqft_basement
+  Above Ground Square Footage - sqft_above
+  Total Living Square Footage - sqft_living (this is the sum of basement and above ground square footage)
+  Ratio of Above Ground to Below Ground Square Footage - ratio_sqft_above (value of 1 means the house has no basement)
+Property Size:
+  A logarithmically scaled version of the Lot Square Footage - log_sqft_lot
+House Properties:
+    Note, that there are some properties listed as having 0 bathrooms which seems to be an error. This error occurs          across: bathrooms, and bedrooms. The two zero values are not always paired, so assuming that the property was a plot     of land does not hold valid.  I would need further documentation to dig deeper as to the significance of these           values. They may affect the variable's usability in the model, but we will proceed with caution surrounding this         variable. 
+  Number of Bathrooms - bathrooms
+  Number of Bedrooms - bedrooms (Note this is not a discrete variable with each 1-4 bedrooms having a respective category                                   and then the rest are grouped as 5+)
+  Number of Floors - floors
+  Whether the House has been Renovated - renovated (T/F)
+  Whether the House has a View to the Waterfront - waterfront (T/F)
+  Whether the House is in Seattle - Seattle (T/F)
+  Whether the House has a Basement - basement (T/F)
+Sales Information:
+    I determined that the  April through August demonstrate the signs of a peak season in volume of sales. Those 5 months record a total sales between the two years of over 1250.  
+  Whether the House was Sold during Peak Volume Season - peak_volume_season
+  Whether the House was Sold to the First Viewer - first_view_sale
+  Number of Viewers till the House Sold - view
+  The Sale PRICE of the House - price [THIS IS OUR TARGET VARIABLE]
+
+
+# 4. Training-Validation Split
+
+Split the data into training and validation sets to evaluate the model's
+performance.
+
+```{r}
+library(rsample)
+set.seed(42)
+Split_House_DF <- initial_split(working_HouseDF,
+                         prop = 7/10)
+
+TrainData <- training(Split_House_DF)
+  
+ValiData <- testing(Split_House_DF)
+
+rm(Split_House_DF)
+```
+
+*Interpretation*: I am splitting the data to train have data to compare
+the performance of our model too. One section(larger portion) will be
+used to train the model and create the best linear model I can. The
+smaller section will then be used to compare the accuracy of our model
+to. Basically, I tell the model to learn the patterns that lead to the
+answers its given. I then test whether those patterns hold true to
+unseen data. By having the answers already, I can see how close the
+model gets and test the models biases if it has any. Normally ratios of
+80/20(80% of data are used for training, 20% for validating), 70/30, and
+60/40. The smalller the dataset, the more you need to partition to
+validation data to ensure you have enough data to test on. I choose to
+use 70/30 for my split because the dataset is fairly large.
+
+         
+
+# 5. Model 1 Linear Regression Model
+
+## 5.1 Model 1 Predictions
+
+Train Model 1 and generate predictions on the validation data.
+
+```{r}
+Reg_model_1 <- lm(
+  formula = price ~ 
+    . - sqft_living - sqft_above - sqft_basement - basement - first_view_sale ,
+  data = TrainData
+)
+summary(Reg_model_1)
+```
+This model has great efficiency with all its coefficients except whether the house has a waterfront view. This model is not great at predicting as it can only explain 33% of the variance in price based on the variables. In other words, this model kinda sucks, but the biggest problem right now is that waterfront is not a reliable predictor. 
+
+```{r}
+rm(Reg_model_1)
+
+Reg_model_2 <- lm(
+  formula = price ~ 
+    . - sqft_living - sqft_above - sqft_basement - basement - first_view_sale -
+    waterfront,
+  data = TrainData
+)
+summary(Reg_model_2)
+```
+This model has fully efficient variables, but is still crappy at predicting price. 
+
+```{r}
+rm(Reg_model_2)
+
+Reg_model_3 <- lm(
+  formula = price ~ 
+    .  - sqft_above - ratio_sqft_above - first_view_sale -
+    waterfront,
+  data = TrainData
+)
+summary(Reg_model_3)
+```
+A good bit better at predicting, but I know I can get more accurate. And I need to reconsider some of the inefficient variables. Floors is the worst.
+
+```{r}
+rm(Reg_model_3)
+
+Reg_model_4 <- lm(
+  formula = price ~ 
+    .  - sqft_above - ratio_sqft_above - first_view_sale - waterfront - floors,
+  data = TrainData
+)
+summary(Reg_model_4)
+```
+
+This model is no more accurate than the one with floors. I am keeping floors out as it may cause overfitting and it didnt affect the models accuracy. I am now going to simplify the model as much as I can to decrease overfitting and maintain as much accuracy as possible. 
+
+```{r}
+rm(Reg_model_4)
+
+Reg_model_5 <- lm(
+  formula = price ~ 
+    sqft_living + bathrooms + view + 
+    ratio_sqft_above + bedrooms + renovated +
+    peak_volume_season + Seattle ,
+  data = TrainData
+)
+summary(Reg_model_5)
+```
+Let's check the linear regression for validity:
+```{r}
+library(lmtest)
+library(gvlma)
+library(stats)
+library(car)
+```
+
+```{r}
+multico <- vif(Reg_model_5)
+multico
+
+heteroSk <- bptest(Reg_model_5)
+heteroSk
+```
+There is likely heteroskedasticity in the model as indicated by the very low p-value
+This will account for and correct heteroskedasticity. 
+```{r}
+model_of_weights <- lm(abs(Reg_model_5$residuals) ~ Reg_model_5$fitted.values)
+
+weight <- 1/(model_of_weights$fitted.values)^2
+
+Reg_model_5_weighted <- lm(
+  formula = price ~ 
+    sqft_living + bathrooms + view + 
+    ratio_sqft_above + bedrooms + renovated +
+    peak_volume_season + Seattle ,
+  data = TrainData,
+  weights = weight
+)
+summary(Reg_model_5_weighted)
+```
+```{r}
+vif(Reg_model_5_weighted)
+bptest(Reg_model_5_weighted)
+gvlma(Reg_model_5_weighted)
+```
+MultiCollinearity is not present (two variable explaining the same difference in price), and heterskedasticity is not present. Many other assumptions were not satisfied, but any further transformations would lead to poor interpretability as the model would be discussing percent changes caused by unit changes etc. The best I can provide is robust standard errors for each coefficient to determing their reliability.
+
+```{r}
+library(sandwich)
+library(lmtest)
+```
+
+```{r}
+robust_variance_mat <- vcovHC(Reg_model_5_weighted,
+                              type = "HC3")
+coeftest(Reg_model_5_weighted,
+         robust_variance_mat)
+```
+
+
+This model is about as accurate as it can get. The bedrooms variable is counterintuitive to my expectations. However it seems that the most desirable houses have 2 bedrooms according to this regression. The factors in order of significance on price are as follows: 
+  Living Square Footage - It is the base unit for multiplication. Basically every square foot of living space is worth about $195.4. 
+For example a 1000 sqft house starts at $195,400 before considering any other factors.
+  Whether the house is in Seattle - A house in Seattle will on average sell for $121,688 more
+  How many views the house gets - This is a high multiplier coefficient. The model estimates that every additional view before the house is sold will increase the price by about $33,683. This is likely explained by competing offers when more people view it. 
+  The ratio of square footage above is positively correlated with price. Since this ratio maxes at 1 (meaning the house has no basement) you could add on a max $67,300.
+  The number of bathrooms is the next important factor. This adds about $8,945 per bathroom. 
+This maxes out at adding $67,088
+  Selling the house during peak season (April-August) on average gives about $8,474 bonus to the sale.
+  Houses with renovations add $38,051 to their price.
+  
+  Finally, let's talk about the bedrooms. Going from a single bedroom to a 2 bedroom property, you see a $992 increase in price. 
+  A 3 bedroom according to this model loses $19,281 compared to a single bedroom. 
+  A 4 bedroom loses $36,852 compared to a single bedroom.
+  5+ bedroom unit lose $71,901 compared to a single bedroom.
+  
+  When breaking it down that way, it seems counter-intuitive, but really the model is explaining that 2-bedroom houses are the most valuable if everything else is the same. This model, as counter-intuitive as it is to lose value with more than 2 bedrooms, explains market preference. Above 2 bedroom units, the number of bedrooms becomes less important, and instead other variables may become more important. 
+  The model does not show high reliability of the two bedroom or three bedroom houses.
+
+Lets perform a partial f-test to consider whether the bedrooms discrete variable is worth keeping.
+```{r}
+Reg_model_5_weighted_reduced <- update(Reg_model_5,
+                                       . ~ . - bedrooms)
+anova(Reg_model_5_weighted_reduced,
+      Reg_model_5_weighted)
+```
+This confirms the model significantly improves by including the bedrooms variable even though two levels of the variable are not statistically significant. 
+
+Now we will use the model to predict the training data
+  
+```{r}
+library(forecast)
+```
+  
+```{r}
+training_predictions <- predict(object = Reg_model_5_weighted,
+                                newdata = TrainData[,
+                                                    -c(16)])
+accuracy(object = training_predictions,
+         TrainData[,
+                   c(16)])
+
+```
+
+
+
+---
+
+## 5.2 Model 1 Evaluation
+
+
+
+
+Evaluate Model 1 using appropriate metrics (e.g., accuracy, ROC, confusion matrix).
+
+```{r}
+valid_predictions <- predict(Reg_model_5_weighted,
+                             ValiData[,
+                                      -c(16)])
+accuracy(valid_predictions,
+         ValiData$price)
+```
+
+*Interpretation*: Starting off, the model is not fantastic, but not due to the data. More likely, the linear regression model isn't the best tool for dealing with real estate sales. Linear regressions are limited by the physical properties of the house and location is a huge factor for house sales. The Seattle variable attempts to capture location, but even in Seattle, different locations can have drastically different pricing factors. 
+All measures of accuracy did not change very much which indicates that the model is robust without over-fitting. Over-fitting is when you add too many variables to the model to increase it's accuracy on training data. When a model is over-fit on training data it performs drastically weaker on validation data. 
+  ME (mean error): This being negative indicates the model tends to under-predict price. The problem with reliance on this number is that it is calculated without absolute values. That means if for one house it over-predicts by 5,000 and another house it under-predicts by 10,000, the model will report an average error of -5,000. This represents under or over prediction bias, but is not a great measure of precision. 
+  RMSE (root mean square error): This indicates that on average the predictions of this model are off by $150,144.
+  MAE (mean average error): This is the average absolute difference between the predicted price and the actual price. The model is accurate + or - $118,653 on average per prediction. 
+  MPE (mean percent error): The negative sign here again indicates the model underpredicts price. This suffers from a similar issue as ME where cancellation occurs.
+  MAPE (mean absolute percent error): This model is on average 29.19% away from the actual value. This is not very accurate especially for real estate transactions. 
+
+```{r}
+rm(Reg_model_5,
+   Reg_model_5_weighted_reduced,
+   robust_variance_mat,
+   training_predictions,
+   valid_predictions,
+   weight,
+   heteroSk,
+   model_of_weights,
+   multico)
+```
+
+
+# 6. Model 2 Segmented Linear Regression model
+
+## 6.1 Model 2 Predictions
+
+Train Model 2 and generate predictions on the validation data.
+
+### First - resplit
+
+We will need to resplit the data because we need to have equal portions
+of each segment (bedroom group) in the training and validation sets.
+
+```{r}
+rm(TrainData,
+   ValiData)
+
+set.seed(42)
+
+initial <- initial_split(working_HouseDF,
+                         prop = 7/10,
+                         strata = bedrooms)
+TrainData <- training(initial)
+
+ValiData <- testing(initial)
+
+rm(initial)
+```
+
+Now I need to build a linear model for each of the separate datasets. I
+will create the best linear model for each of the segments (bedroom
+groups). I will only output the best function I find after swapping in
+and out variables.
+
+### Segment 1-Bedroom
+
+```{r}
+TrainData_B1 <- TrainData %>%
+  filter(bedrooms == "1")
+str(TrainData_B1)
+
+B1_Reg_model <- lm( price ~ sqft_living + Seattle + log_sqft_lot +
+                        bathrooms + sqft_basement + floors, 
+                      data = TrainData_B1
+)
+summary(B1_Reg_model)
+```
+
+This model may be affected by outliers. I will have to apply any
+transformation I perform here to the validation data as well, the
+cutoffs applied here must be valued as absolute rather than relative. In
+other words, whatever cutoff I apply here will be the same cutoff for
+the validation data.
+
+```{r}
+ggplot(data = TrainData_B1)+
+  geom_histogram(
+    aes(
+      x= sqft_living
+    )
+  )
+
+B1_living_limits <- list( 
+  quantile(
+    TrainData_B1$sqft_living,
+    .25
+    ) - ( 1.5*IQR(TrainData_B1$sqft_living) ),
+  quantile(
+    TrainData_B1$sqft_living,
+    .75) + (1.5*IQR(TrainData_B1$sqft_living) )
+  )
+  
+
+TrainData_B1 <- TrainData_B1 %>%
+  filter(
+    sqft_living >= B1_living_limits[1] &
+      sqft_living <= B1_living_limits[2])
+
+
+```
+
+We will lose 3 observations that could be severely impacting our model.
+Now lets rerun the regression model:
+
+```{r}
+B1_Reg_model <- lm( price ~ sqft_living + Seattle + log_sqft_lot + peak_volume_season + basement, 
+                      data = TrainData_B1
+)
+summary(B1_Reg_model)
+```
+
+```{r}
+vif(B1_Reg_model)
+bptest(B1_Reg_model)
+gvlma(B1_Reg_model)
+```
+
+This model is as accurate and efficient as I can get.
+
+```{r}
+B1_train_predictions <- predict(B1_Reg_model,
+                                TrainData_B1[,
+                                             -c(16)])
+
+accuracy(B1_train_predictions,
+         TrainData_B1$price)
+```
+
+Overall, the model is not great at predicting, and this seems to be the
+best model I can produce for 1 bedrooms. This doesn't mean the overall
+model will lose any efficiency. At the end of the day, I expect an the
+accuracy of the segmented regression model to be higher than that of my
+simple linear regression model.
+
+```{r}
+rm(TrainData_B1,
+   B1_train_predictions)
+```
+
+### Segment 2-Bedroom
+
+```{r}
+TrainData_B2 <- TrainData %>%
+  filter(bedrooms == "2")
+str(TrainData_B2)
+
+B2_Reg_model <- lm( price ~ 
+                      sqft_living + Seattle + bathrooms + 
+                      sqft_basement + floors + first_view_sale ,
+                    data = TrainData_B2
+)
+summary(B2_Reg_model)
+vif(B2_Reg_model)
+bptest(B2_Reg_model)
+gvlma(B2_Reg_model)
+```
+
+Skewness is the main issue, then I will address the bptest that shows
+heteroskedasticity.
+
+```{r}
+ggplot(data = TrainData_B2) +
+  geom_histogram(
+    aes(
+      x=price
+    )
+  )
+
+ggplot(data = TrainData_B2) +
+  geom_histogram(
+    aes(
+      x=sqft_living
+    )
+  )
+ggplot(data = TrainData_B2) +
+  geom_histogram(
+    aes(
+      x=bathrooms
+    )
+  )
+ggplot(data = TrainData_B2) +
+  geom_histogram(
+    aes(
+      x=sqft_basement
+    )
+  )
+ggplot(data = TrainData_B2) +
+  geom_histogram(
+    aes(
+      x=view
+    )
+  )
+```
+
+```{r}
+B2_sqft_living_cutoffs <- list(quantile(TrainData_B2$sqft_living,
+                                        .25) - (1.5*IQR(TrainData_B2$sqft_living)),
+                               quantile(TrainData_B2$sqft_living,
+                                        .75) + (1.5*IQR(TrainData_B2$sqft_living)))
+
+TrainData_B2 <- TrainData_B2 %>%
+  filter(
+    sqft_living >= B2_sqft_living_cutoffs[1] &
+      sqft_living <= B2_sqft_living_cutoffs[2]
+    )
+ggplot(data = TrainData_B2) +
+  geom_histogram(
+    aes(
+      x=sqft_living
+    )
+  )
+```
+
+I removed the skewness in square footage by capping it to 2220. This
+results in 3% dataloss which is acceptable.
+
+Rerun the regression:
+
+```{r}
+B2_Reg_model <- lm( price ~ 
+                      sqft_living + Seattle + bathrooms + 
+                      sqft_basement + floors + first_view_sale ,
+                    data = TrainData_B2
+)
+summary(B2_Reg_model)
+vif(B2_Reg_model)
+bptest(B2_Reg_model)
+gvlma(B2_Reg_model)
+```
+
+Heteroskedasticity may be present I'll readress that before addressing
+skewness anymore:
+
+```{r}
+model_of_weights <- lm(abs(B2_Reg_model$residuals) ~ B2_Reg_model$fitted.values)
+
+weight <- 1/(model_of_weights$fitted.values)^2
+
+B2_Reg_model_weighted <- lm(
+  formula = price ~ 
+    sqft_living + Seattle + bathrooms + 
+    sqft_basement + floors + first_view_sale,
+  data = TrainData_B2,
+  weights = weight
+)
+summary(B2_Reg_model_weighted)
+
+vif(B2_Reg_model_weighted)
+bptest(B2_Reg_model_weighted)
+gvlma(B2_Reg_model_weighted)
+```
+
+I lost a lot of accuracy by removing the "outliers" and it didn't remove
+the skewness, we will add it back and continue while understanding the
+model is violating certain assumptions of a linear regression. This
+makes sense because many of these relationships are not linear. I am
+reverting back to containing all datapoints and continuing with the
+weighted model which removes the heteroskedasticity.
+
+```{r}
+TrainData_B2 <- TrainData %>%
+  filter(bedrooms == "2")
+str(TrainData_B2)
+
+B2_Reg_model <- lm( price ~ 
+                      sqft_living + Seattle + bathrooms + 
+                      sqft_basement + floors + first_view_sale ,
+                    data = TrainData_B2
+)
+
+model_of_weights <- lm(abs(B2_Reg_model$residuals) ~ B2_Reg_model$fitted.values)
+
+weight <- 1/(model_of_weights$fitted.values)^2
+
+B2_Reg_model_weighted <- lm(
+  formula = price ~ 
+    sqft_living + Seattle + bathrooms + 
+    sqft_basement + floors + first_view_sale,
+  data = TrainData_B2,
+  weights = weight
+)
+summary(B2_Reg_model_weighted)
+
+vif(B2_Reg_model_weighted)
+bptest(B2_Reg_model_weighted)
+gvlma(B2_Reg_model_weighted)
+
+```
+
+```{r}
+B2_train_predictions <- predict(B2_Reg_model_weighted,
+                                TrainData_B2[,
+                                             -c(16)])
+
+accuracy(B2_train_predictions,
+         TrainData_B2$price)
+```
+
+Okay, this model is getting closer to beating the simpler linear
+regression model that didn't segment based on number of bedrooms.
+
+```{r}
+rm(TrainData_B2,
+   model_of_weights,
+   B2_sqft_living_cutoffs,
+   B2_Reg_model,
+   B2_train_predictions,
+   weight)
+```
+
+### Segment 3-Bedroom
+
+```{r}
+TrainData_B3 <- TrainData %>%
+  filter(bedrooms == "3")
+str(TrainData_B3)
+
+B3_Reg_model <- lm(
+  price ~
+    sqft_living + bathrooms + sqft_basement + view +
+    renovated + peak_volume_season + Seattle ,
+  data = TrainData_B3
+)
+summary(B3_Reg_model)
+
+vif(B3_Reg_model)
+bptest(B3_Reg_model)
+gvlma(B3_Reg_model)
+
+summary(TrainData_B3$sqft_living)
+ggplot(data = TrainData_B3) +
+  geom_histogram(
+    aes(
+      x=sqft_living
+    )
+  )
+```
+
+Remove skewness in sqft_living:
+
+```{r}
+B3_living_limits <- list(
+  quantile(
+    TrainData_B3$sqft_living,
+    .25) - ( 1.5*IQR(TrainData_B3$sqft_living) ),
+  quantile(
+    TrainData_B3$sqft_living,
+    .75) + ( 1.5*IQR(TrainData_B3$sqft_living) )
+  )
+
+TrainData_B3 <- TrainData_B3 %>%
+  filter(
+    sqft_living >= B3_living_limits[1] &
+      sqft_living <= B3_living_limits[2]
+  )
+
+```
+
+Less than a 3% loss in data which is acceptable.
+
+```{r}
+B3_Reg_model <- lm(
+  price ~
+    sqft_living + bathrooms + sqft_basement + view +
+    renovated + peak_volume_season + Seattle ,
+  data = TrainData_B3
+)
+summary(B3_Reg_model)
+
+vif(B3_Reg_model)
+bptest(B3_Reg_model)
+gvlma(B3_Reg_model)
+```
+
+It didn't remove skewness, and it hurts the accuracy, so I will keep the
+outliers.
+
+```{r}
+TrainData_B3 <- TrainData %>%
+  filter(bedrooms == "3")
+str(TrainData_B3)
+
+B3_Reg_model <- lm(
+  price ~
+    sqft_living + bathrooms + sqft_basement + view +
+    renovated + peak_volume_season + Seattle ,
+  data = TrainData_B3
+)
+summary(B3_Reg_model)
+
+model_of_weights <- lm(abs(B3_Reg_model$residuals) ~ B3_Reg_model$fitted.values)
+
+weight <- 1/(model_of_weights$fitted.values)^2
+
+B3_Reg_model_weighted <- lm(
+  formula = price ~ 
+    sqft_living + bathrooms + sqft_basement + view +
+    renovated + peak_volume_season + Seattle,
+  data = TrainData_B3,
+  weights = weight
+)
+summary(B3_Reg_model_weighted)
+
+vif(B3_Reg_model_weighted)
+bptest(B3_Reg_model_weighted)
+gvlma(B3_Reg_model_weighted)
+
+```
+
+Running into similar issues as the last model. This is the best the
+linear regression can do with the relationships between these variables.
+
+```{r}
+B3_train_predictions <- predict(B3_Reg_model_weighted,
+                                TrainData_B3[,
+                                             -c(16)])
+
+accuracy(B3_train_predictions,
+         TrainData_B3$price)
+```
+
+Again, getting similar results as the simple regression above, but lets
+follow this through:
+
+```{r}
+rm(TrainData_B3,
+   B3_Reg_model,
+   B3_living_limits,
+   model_of_weights,
+   B3_train_predictions,
+   weight)
+```
+
+### Segment 4-Bedroom
+
+```{r}
+TrainData_B4 <- TrainData %>%
+  filter(bedrooms == "4")
+str(TrainData_B4)
+
+B4_Reg_model <- lm(
+  price ~
+    sqft_living + bathrooms + sqft_basement + 
+    floors + view  + renovated + peak_volume_season + 
+    Seattle ,
+  data = TrainData_B4
+)
+summary(B4_Reg_model)
+
+vif(B4_Reg_model)
+bptest(B4_Reg_model)
+gvlma(B4_Reg_model)
+```
+
+There is skewness and heterskedasticity. Let's run the same attempted
+transformations
+
+```{r}
+B4_living_limits <- list(
+  quantile(
+    TrainData_B4$sqft_living,
+    .25) - ( 1.5*IQR(TrainData_B4$sqft_living) ),
+  quantile(
+    TrainData_B4$sqft_living,
+    .75) + ( 1.5*IQR(TrainData_B4$sqft_living) )
+  )
+
+TrainData_B4 <- TrainData_B4 %>%
+  filter(
+    sqft_living >= B4_living_limits[1] &
+      sqft_living <= B4_living_limits[2]
+  )
+
+```
+
+Less than 2% dataloss
+
+```{r}
+B4_Reg_model <- lm(
+  price ~
+    sqft_living + bathrooms + sqft_basement + 
+    floors + view  + renovated + peak_volume_season + 
+    Seattle ,
+  data = TrainData_B4
+)
+summary(B4_Reg_model)
+
+vif(B4_Reg_model)
+bptest(B4_Reg_model)
+gvlma(B4_Reg_model)
+```
+
+It didn't remove skewness, but it did remove kurtosis, so I will
+continue this model with limits on the square footage. Now to addres the
+heteroskedasticity:
+
+```{r}
+model_of_weights <- lm(abs(B4_Reg_model$residuals) ~ B4_Reg_model$fitted.values)
+
+weight <- 1/(model_of_weights$fitted.values)^2
+
+B4_Reg_model_weighted <- lm(
+  formula = price ~ 
+    sqft_living + bathrooms + sqft_basement + view +
+    renovated + peak_volume_season + Seattle,
+  data = TrainData_B4,
+  weights = weight
+)
+summary(B4_Reg_model_weighted)
+
+vif(B4_Reg_model_weighted)
+bptest(B4_Reg_model_weighted)
+gvlma(B4_Reg_model_weighted)
+```
+
+Heteroskedasticity issue cured, this segment is ready.
+
+```{r}
+B4_train_predictions <- predict(B4_Reg_model_weighted,
+                                TrainData_B4[,
+                                             -c(16)])
+
+accuracy(B4_train_predictions,
+         TrainData_B4$price)
+```
+
+It looks like we may get equal or close to equal results as the simple
+linear regression model I tried before splitting the data into bedroom
+groups.
+
+```{r}
+rm(B4_Reg_model,
+   model_of_weights,
+   TrainData_B4,
+   weight,
+   B4_train_predictions)
+```
+
+### Segment 5_plus-Bedroom
+
+```{r}
+TrainData_B5_plus <- TrainData %>%
+  filter(bedrooms == "5_plus")
+str(TrainData_B5_plus)
+
+B5_plus_Reg_model <- lm(price ~ 
+                          sqft_living + floors + view +
+                          Seattle + basement,
+                        data = TrainData_B5_plus)
+
+
+summary(B5_plus_Reg_model)
+vif(B5_plus_Reg_model)
+bptest(B5_plus_Reg_model)
+gvlma(B5_plus_Reg_model)
+```
+
+Skewness and heteroskedasticity again
+
+```{r}
+B5_plus_living_limits <- list(
+  quantile(
+    TrainData_B5_plus$sqft_living,
+    .25) - ( 1.5*IQR(TrainData_B5_plus$sqft_living) ),
+  quantile(
+    TrainData_B5_plus$sqft_living,
+    .75) + ( 1.5*IQR(TrainData_B5_plus$sqft_living) )
+  )
+
+TrainData_B5_plus <- TrainData_B5_plus %>%
+  filter(
+    sqft_living >= B5_plus_living_limits[1] &
+      sqft_living <= B5_plus_living_limits[2]
+  )
+
+```
+
+Less than 2% dataloss. Acceptable
+
+```{r}
+B5_plus_Reg_model <- lm(
+  price ~
+    sqft_living + bathrooms + sqft_basement + 
+    floors + view  + renovated + peak_volume_season + 
+    Seattle ,
+  data = TrainData_B5_plus
+)
+summary(B5_plus_Reg_model)
+
+vif(B5_plus_Reg_model)
+bptest(B5_plus_Reg_model)
+gvlma(B5_plus_Reg_model)
+```
+
+Removing outliers also cured the heteroskedasticity issue.
+
+```{r}
+B5_plus_train_predictions <- predict(B5_plus_Reg_model,
+                                TrainData_B5_plus[,
+                                             -c(16)])
+
+accuracy(B5_plus_train_predictions,
+         TrainData_B5_plus$price)
+```
+
+Again my mental math believes that adding these multiple different
+regression models fitted to each market segment is going to increase
+accuracy over the original model.
+
+```{r}
+rm(TrainData_B5_plus,
+   B5_plus_train_predictions)
+```
+
+### COMBINE best separate models into a segmented linear regression model.
+
+#### First preprocess function to bring Validata within the same limits as each of the segments
+
+```{r}
+SegmentPreProcessFn <- function(DF) {
+  
+  B1DF <- DF %>%
+    filter( bedrooms == "1") %>%
+    filter(between(sqft_living,
+                   B1_living_limits[[1]],
+                   B1_living_limits[[2]]))
+  B2DF <- DF %>%
+    filter( bedrooms == "2") 
+  B3DF <- DF %>%
+    filter( bedrooms == "3")
+  B4DF <- DF %>%
+    filter( bedrooms == "4") %>%
+    filter( between(sqft_living,
+                    B4_living_limits[[1]],
+                    B4_living_limits[[2]]))
+  B5_plusDF <- DF %>%
+    filter( bedrooms == "5_plus") %>%
+    filter( between(sqft_living,
+                    B5_plus_living_limits[[1]],
+                    B5_plus_living_limits[[2]]))
+  
+  output <- bind_rows(B1DF,
+                      B2DF,
+                      B3DF,
+                      B4DF,
+                      B5_plusDF)
+  return(output)
+  
+  
+}
+```
+
+Let's create a function to predict in segments and compare to the
+original kNN regression to see if it is any better.
+
+```{r}
+Segmented_LM_Model <- function(new_data,
+                               fnSegment1,
+                               fnSegment2,
+                               fnSegment3,
+                               fnSegment4,
+                               fnSegment5) {
+  
+  ## Overall predictions
+  predictions <- dplyr::case_when(
+    new_data$bedrooms == "1" ~ predict(fnSegment1, newdata = new_data),
+    new_data$bedrooms == "2" ~ predict(fnSegment2, newdata = new_data),
+    new_data$bedrooms == "3" ~ predict(fnSegment3, newdata = new_data),
+    new_data$bedrooms == "4" ~ predict(fnSegment4, newdata = new_data),
+    new_data$bedrooms == "5_plus" ~ predict(fnSegment5, newdata = new_data),
+    TRUE ~ NA_real_ 
+  )
+  
+  ## segment specific accuracy
+  
+    ## Segment 1
+  B1DF <- new_data %>%
+    filter(bedrooms == "1")
+  
+  
+  B1_predictions <- predict(fnSegment1, 
+                            newdata = B1DF[,
+                                 -c(16)])
+  
+  B1_accuracy <- accuracy(B1_predictions ,
+                           B1DF$price)
+   
+   ## Segment 2
+  B2DF <- new_data %>%
+    filter(bedrooms == "2")
+  
+  
+  B2_predictions <- predict(fnSegment2, 
+                            newdata = B2DF[,
+                                 -c(16)])
+  
+  B2_accuracy <- accuracy(B2_predictions ,
+                           B2DF$price)
+    
+    ## Segment 3
+  B3DF <- new_data %>%
+    filter(bedrooms == "3")
+  
+  
+  B3_predictions <- predict(fnSegment3, 
+                            newdata = B3DF[,
+                                 -c(16)])
+  
+  B3_accuracy <- accuracy(B3_predictions ,
+                           B3DF$price)
+    
+    ## Segment 4
+  B4DF <- new_data %>%
+    filter(bedrooms == "4")
+  
+  
+  B4_predictions <- predict(fnSegment4, 
+                            newdata = B4DF[,
+                                 -c(16)])
+  
+  B4_accuracy <- accuracy(B4_predictions ,
+                           B4DF$price)
+  
+    ## Segment 5
+  B5_plusDF <- new_data %>%
+    filter(bedrooms == "5_plus")
+  
+  
+  B5_plus_predictions <- predict(fnSegment5, 
+                            newdata = B5_plusDF[,
+                                      -c(16)])
+  
+  B5_plus_accuracy <- accuracy(B5_plus_predictions ,
+                           B5_plusDF$price)
+  
+  return(list(predictions = predictions,
+              B1_accuracy = B1_accuracy, 
+              B2_accuracy = B2_accuracy,
+              B3_accuracy = B3_accuracy, 
+              B4_accuracy = B4_accuracy,
+              B5_plus_accuracy = B5_plus_accuracy
+              ))
+}
+```
+
+*Interpretation*: Alright, so I developed separately a linear regression
+model for each bedroom group. As discussed earlier, the markets between
+the bedroom groups is different enough to capture in a single variable.
+When I was trying earlier to run one linear regression for all of the
+housing
+
+*Interpretation*: Similar to Model 1, describe the second model's
+predictions: "Model 2 is similar to the first, but it uses a different
+approach to predict the outcome. We are comparing how each model
+performs."
+
+------------------------------------------------------------------------
+
+## 6.2 Model 2 Evaluation
+
+Evaluate Model 2 using appropriate metrics (e.g., accuracy, ROC,
+confusion matrix).
+
+```{r}
+ValiData <- SegmentPreProcessFn(ValiData)
+
+Segmented_Training_Predictions <- Segmented_LM_Model(new_data = ValiData,
+                                                     fnSegment1 = B1_Reg_model,
+                                                     fnSegment2 = B2_Reg_model_weighted,
+                                                     fnSegment3 = B3_Reg_model_weighted,
+                                                     fnSegment4 = B4_Reg_model_weighted,
+                                                     fnSegment5 = B5_plus_Reg_model)
+Segmented_Training_Predictions$B1_accuracy
+Segmented_Training_Predictions$B2_accuracy
+Segmented_Training_Predictions$B3_accuracy
+Segmented_Training_Predictions$B4_accuracy
+Segmented_Training_Predictions$B5_plus_accuracy
+GenAccuracy <- accuracy(Segmented_Training_Predictions$predictions,
+                        ValiData$price)
+GenAccuracy
+```
+
+*Interpretation*:
+
+Segmenting by bedrooms was a lot of work and barely increased the
+accuracy of the model. It is less than 1% more accurate. The model is
+most accurate with 2, 3, and 4 bedroom houses. The model tends to
+over-predict prices for 1 bedroom and 4 bedroom houses, and
+under-predict for 2, 3, and 5 plus bedroom houses. Overall the model on
+average underpredicts.
+
+\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~\~
+
+# 7. Final Prediction
+
+Combine the results from Model 1 and Model 2 to make a final prediction
+or decision. Since they are comparable, I will simply compare the two
+results, but more likely weigh the results of the segmented model
+heavier.
+
+### Build function for initial processing:
+
+```{r}
+
+InitialProcessFn <- function(rawDF) {
+  
+  ## bedroom manipulations
+  rawDF <- rawDF %>%
+    mutate( bedrooms = as.character(bedrooms)) %>%
+      mutate( bedrooms = as.numeric(bedrooms)) %>%
+      filter(bedrooms <= 11 &
+               bedrooms != 0 )
+  rawDF <- rawDF %>%
+    mutate( bedrooms = case_when(
+      bedrooms == 1 ~ "1",
+      bedrooms == 2 ~ "2",
+      bedrooms == 3 ~ "3",
+      bedrooms == 4 ~ "4",
+      bedrooms >= 5 ~ "5_plus"
+      ))
+     
+
+  ### ensure zipcodes are in charcter
+  rawDF$zipcode <- as.character(rawDF$zipcode)
+  ## transformations
+  rawDF <- rawDF %>%
+    mutate(
+    ratio_sqft_above = sqft_above / sqft_living ,
+    peak_volume_season = case_when(
+      Month < 4 |
+        Month > 8 ~ "False" ,
+      .default = "True"
+      ),
+    first_view_sale = case_when(
+      view < 1 ~ "True",
+      .default = "False"
+      ), 
+    Seattle = case_match(
+      zipcode,
+      Seattle_Zips ~ "True",
+      .default = "False"
+      ),
+    basement = case_when(
+      sqft_basement != 0 ~ "True",
+      .default = "False"
+    ),
+    log_sqft_lot = log(sqft_lot),
+    renovated = case_when(
+      yr_renovated !=0 ~ "True",
+      .default = "False"
+    )
+    ) %>%
+  mutate(
+    across(
+      c(peak_volume_season, first_view_sale, Seattle, basement, waterfront,
+        zipcode, renovated),
+      as.factor
+    )
+  ) %>%
+  mutate(
+    across(
+      c(bathrooms, sqft_living, sqft_above, sqft_basement,
+        sqft_lot, floors, view, yr_built, yr_renovated,
+        Month, Year, log_sqft_lot),
+      as.numeric  )
+    )
+
+  
+  output <- rawDF %>%
+    select(sqft_living, sqft_above, bathrooms, floors,
+         sqft_basement, view, ratio_sqft_above, log_sqft_lot, bedrooms, 
+         renovated, waterfront, peak_volume_season, first_view_sale, Seattle, 
+         basement)
+  return(output)
+}
+```
+
+#### All in one function to get the prediction:
+
+```{r}
+all4one <- function(raw) {
+  initial <- InitialProcessFn(raw)
+  prepro <- SegmentPreProcessFn(initial)
+  output <- Segmented_LM_Model(prepro,
+                               fnSegment1 = B1_Reg_model,
+                               fnSegment2 = B2_Reg_model_weighted,
+                               fnSegment3 = B3_Reg_model_weighted,
+                               fnSegment4 = B4_Reg_model_weighted,
+                               fnSegment5 = B5_plus_Reg_model)
+  
+  return(output)
+}
+
+```
+
+### Load and predict
+
+```{r}
+deployDF <- read.csv("house_test_15.csv")
+SegmentResults <- all4one(deployDF)
+SegmentPredictions <- data.frame(SegmentResults$predictions)
+
+
+deployDF2 <- InitialProcessFn(deployDF)
+LinearResults <- predict(Reg_model_5_weighted,
+                         deployDF2)
+LinearPredictions <-data.frame(LinearResults)
+
+compareDF <- data.frame(SegmentPredictions,
+                        LinearPredictions)
+compareDF
+
+```
+
+*Interpretation*: 
+Comparing the price predictions side by side, it would
+be really hard to tell which ones are accurate without going one by one.
+Considering the segmented model is more accurate (not by much), I
+consider those to be final when the difference in predictions is large.
+Since both models tend to underpredict, I would choose the higher of the
+two predictions first. However, considering the limitations of the
+model, I would decide on price based on what factors of the house are
+its biggest features. If it's features hold more weight in one of the
+models, I would recommend that model to determine price. 
+Speaking of
+limitations: 
+  Both models are limited to: 
+  Price - \<= \$1,116,250
+  Bedrooms - \<= 11 bedrooms 
+  The segmented model adds the following limitations: 
+1 Bedroom - \<= 1733.73 square feet living space 
+4 Bedroom - 647.5-4147.5 square feet living space 
+5 Plus Bedroom - 865-4665 square feet living space
