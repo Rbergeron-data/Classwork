@@ -1,0 +1,1103 @@
+---
+title: "Project 1 alt"
+author: "Rene Bergeron, Joseph Mukanda, Aiyanah Kasota"
+date: "2025/11/09"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    collapsed: false
+    theme: united
+---
+
+# Initialize
+
+Load libraries:
+
+```{r libraries}
+library(car)
+library(dplyr)
+library(caret)
+library(ggplot2)
+library(rpart)
+library(rpart.plot)
+library(mclust)
+library(rsample)
+library(pROC)
+```
+
+# 1. Load Data
+
+In this section, we will load the dataset required for the analysis.
+
+```{r loading_data}
+CarTrain <- read.csv('car_train_class_wi_29.csv',
+                     header = TRUE)
+```
+
+*Interpretation*: The CarTrain dataset we just loaded includes vehicle information including (but not limited to) technical specifications, physical characteristics, accident history, listing history, where the vehicle was sourced, and our variable of interest Price. The price is not a number, it is whether or not the vehicle was priced high or if it was priced low.
+
+Once the data is loaded, ensure to examine its structure to ensure everything is in order before moving forward. Explain briefly what each dataset column represents, using layman's terms where necessary. For example: "This dataset includes customer data such as age, income, and purchase behavior."
+
+------------------------------------------------------------------------
+
+# 2. Explore Data
+
+Explore the data to understand its structure, summary statistics, and any potential issues with missing values or outliers.
+
+## EDA1 
+-Suggests that horsepower
+Basic structure of the data
+```{r EDA1_Basic_Structure}
+str(CarTrain)
+str(CarTrain$horsepower)
+summary(CarTrain$horsepower)
+str(CarTrain$power_hp)
+summary(CarTrain$power_hp)
+```
+The two power columns have different summary stats, that means there must be differences between the two. Lets check deeper so we ensure we use the best column based on data accuracy.
+```{r Compare_power_columns}
+power_hpC <- CarTrain %>%
+  select(power_hp,
+         vin)
+
+horsepowerC <- CarTrain %>%
+  select(horsepower,
+         vin)
+```
+
+```{r Summary_of_differences_in_power_column}
+ComparisonDF <- full_join(x= power_hpC,
+                           y= horsepowerC)
+
+
+ComparisonDF$difference <- ComparisonDF$power_hp - ComparisonDF$horsepower
+
+summary(ComparisonDF$difference)
+```
+We see that the resulting dataframe confirms a difference between the two dataframe. On average the two columns 'power_hp' and 'horsepower' are different by 1.656. We added a column that creates a difference between the two columns. If the difference of the values is 0, then the two values are equivalent. There are:
+```{r Number_of_discrepencies}
+sum(!near(ComparisonDF$difference,0))
+```
+rows that do not have the same value for 'power_hp' and 'horsepower' (see preprocessing Step 1 for continuation)
+we can for sure say that vehicles with over 600 horsepower are priced HIGH.
+```{r power_plot}
+EDA1 <- ggplot(data = CarTrain,
+               aes(
+                 x = horsepower,
+                 y = price_nom)) +
+  geom_point()
+
+EDA1
+```
+
+
+```{r power_distribution}
+
+
+horsepowerEDA <- ggplot(data = CarTrain,
+                        aes(x= horsepower
+                        )) +
+  geom_histogram(binwidth = 10)
+horsepowerEDA
+```
+
+There are two semi-normalized groupings in the horsepower variable, and a third grouping that is skewed. It looks like around 110-230 horsepower, and 240-350 are normally distributed, and 350-500 is skewed with a tail to the right. The algorithms should handle grouping these if needed.
+
+
+
+## EDA2 
+-Suggests a relationship between vehicles newer than 2010 being listed high.
+```{r year_plot}
+summary(CarTrain$year)
+
+EDA2 <- ggplot(data = CarTrain,
+               aes(
+                 x = year,
+                 y = price_nom)) +
+  geom_point()
+EDA2
+```
+
+```{r year_distribution}
+str(CarTrain$year)
+yearEDA <- ggplot(data = CarTrain,
+                  aes(
+                    x= year
+                  )) +
+  geom_histogram()
+yearEDA
+```
+
+There are defintely some outliers in the data, lets run the IQR test. This is a test and tool used to take the "middle average data range" to determine what values are extreme. For example there are vehicles as old as 1991 in the data. The "middle average data range" (IQR) of this data is 2017 to 2020 though. The vehicle that is from 1991 is considered an extreme value and skews the data which affects the models ability to predict the average vehicle you would be trying to sell. If we remove outliers, we do narrow the effective scope of this model. This model has specific parameters that will be explained in the limitations section at the end. 
+
+```{r  year_lower_fence}
+print(
+  quantile(CarTrain$year,
+           0.25) -
+    (1.5 * IQR(CarTrain$year))
+)
+```
+
+Anything below that number is considered an outlier. As long as we do not lose excessive amounts of data, we may remove them for clarity and accuracy. 
+```{r build_a_temporary_dattaframe}
+CarTrain1 <- CarTrain %>%
+  filter(year > quantile(CarTrain$year,
+           0.25) -
+    (1.5 * IQR(CarTrain$year)))
+```
+Let's see how much data we removed.
+```{r too_much_dataloss}
+yearDataLoss <- 100* (nrow(CarTrain) - nrow(CarTrain1)) / nrow(CarTrain)
+yearDataLoss
+```
+We would be losing that 10.15% portion of the data, which is unacceptable (too much). This, as the histogram suggests that the year is skewed with less cars in a wider range from 1991-2012 (the lower limit for outliers). We will keep without modifying our dataset and  keeping the mathematical outliers.
+
+
+## EDA3 
+-Shows that the following colors seem to be listed NOT high: (purple, teal, yellow).
+```{r color_plot}
+EDA3 <- ggplot(data = CarTrain,
+               aes(
+                 x = listing_color,
+                 y = price_nom)) +
+  geom_point()
+EDA3
+```
+
+```{r color_structure_and_distribution}
+str(CarTrain$listing_color)
+
+CarTrain$listing_color <- as.factor(CarTrain$listing_color)
+
+str(CarTrain$listing_color)
+
+colorEDA <- ggplot(data = CarTrain,
+                   aes(
+                     x= listing_color
+                   )) +
+  geom_bar()
+
+colorEDA
+
+summary(CarTrain$listing_color)
+```
+Note the statistical reliability is questionable for the following colors due to insufficient data:
+purple, teal, yellow
+
+
+
+## EDA4 
+-Shows the following cars as listing NOT high: (Fiat, Genesis, Hummer, Hyundai, Isuzu, Maserati, Mazda, Mercedes, Mercury, Mini, Pontiac, Rolls Royce, Saturn, Scion, Suzuki, Volkswagen). Contrary, Ram listed as high.
+```{r Vehicle_make_plot}
+EDA4 <- ggplot(data = CarTrain,
+               aes(
+                 x = make_name,
+                 y = price_nom)) +
+  geom_point() +
+  theme(
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = .5,
+      vjust = .5
+    )
+  )
+EDA4
+
+str(CarTrain$make_name)
+
+CarTrain$make_name <- as.factor(CarTrain$make_name)
+
+str(CarTrain$make_name)
+
+summary(CarTrain$make_name)
+```
+Similar issues as above, we may not have enough data to be sure about several of these makes. 
+We DO NOT have enough data for the following makes:
+Alpha Romeo, Fiat, Genesis, Hummer, Isuzu, Maserati, Mercury, Pontiac, Porsche, Rolls-Royce, Saab, Saturn, Scion, Suzuki
+
+In addition to the above listed makes, when we train the model, we have to split the data. We do not have enough data for the following makes to be reliable after the (70/30) split:
+Jaguar, Mitsubishi
+
+
+## EDA5 
+-it seems like anything over 1000 days on the market fetches a high price.
+```{r days_on_market_plot}
+EDA5 <- ggplot(data = CarTrain,
+               aes(
+                 x = daysonmarket,
+                 y = price_nom)) +
+  geom_point()
+EDA5
+```
+Further analyses will look at potential outliers.
+
+```{r days_on_market_upper_fence}
+uFence_daysonmarket <- quantile(CarTrain$daysonmarket,
+           0.25) +
+    (1.5 * IQR(CarTrain$daysonmarket))
+```
+So the upper limit would be 108.5 days. 
+Let's see how much data would be lost if we remove outliers. 
+
+```{r build_a_temporary_dataframe}
+CarTrain1 <- CarTrain %>%
+  filter(daysonmarket < quantile(CarTrain$daysonmarket,
+           0.25) +
+    (1.5 * IQR(CarTrain$daysonmarket)))
+
+DataLoss <- 100 * (nrow(CarTrain)-nrow(CarTrain1))/nrow(CarTrain)
+
+str(CarTrain1)
+print(DataLoss)
+```
+
+Again, if we were to remove outliers, we would be removing too much data (19%). We will continue without removing any outliers for daysonmarket.
+Let's explore the data that would be removed for patterns
+
+```{r days_on_market_number_outliers}
+daysOutliers <- CarTrain %>%
+  filter(daysonmarket > quantile(CarTrain$daysonmarket,
+           0.25) +
+    (1.5 * IQR(CarTrain$daysonmarket)))
+```
+There would be 2039 outliers removed above the upper fence. That would be unacceptable, but maybe those extreme values have a pattern
+
+```{r days_outlier_plot}
+daysOutplot <- ggplot(data =  daysOutliers,
+                     aes(
+                       x= daysonmarket,
+                       y= price_nom
+                     )) +
+  geom_point()
+daysOutplot
+
+```
+There is no obvious pattern. Continuing with the original dataframe
+```{r cleanup_temporary_objects}
+rm(
+  daysOutliers,
+  daysOutplot,
+  CarTrain1,
+  DataLoss,
+  uFence_daysonmarket,
+  yearDataLoss
+)
+```
+
+
+## EDA6 
+-Shows that damaged frames are listed NOT high.
+```{r frame_damaged_plot_and_structures}
+EDA6 <- ggplot(data =  CarTrain,
+               aes(
+                 x= frame_damaged,
+                 y= price_nom)) +
+  geom_point()
+EDA6
+
+str(CarTrain$frame_damaged)
+CarTrain$frame_damaged <- as.factor(CarTrain$frame_damaged)
+str(CarTrain$frame_damaged)
+
+summary(CarTrain$frame_damaged)
+
+```
+We see that there are 4421 missing responses. considering frame damage is extremely uncommon and the next option would be using a statistics tool called multiple imputation that I do not understand how to implement. I recommend creating a new category 'unkown' for the missing values. See preprocessing STEP 6. for the creation.
+
+
+## EDA7 
+-Shows that certain engines are listed NOT high: (H4, H6, I3, I4 flex fuel, I4 hybrid, I5, V10, W12), on the contrary, V12s and V6 hybrid engines are listed high.
+```{r engine_cylinders_plot_and_structure}
+EDA7 <- ggplot(data = CarTrain,
+               aes(
+                 x = engine_cylinders,
+                 y = price_nom)) +
+  geom_point() +
+  theme(
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = .5,
+      vjust = .5
+    )
+  )
+EDA7
+
+str(CarTrain$engine_cylinders)
+CarTrain$engine_cylinders <- as.factor(CarTrain$engine_cylinders)
+str(CarTrain$engine_cylinders)
+
+summary(CarTrain$engine_cylinders)
+
+```
+
+As above, let's discuss whether we have enough data to support claims about correlation to sales:
+We DO NOT have enough data for the following engines: H6, I4 Hybrid, I5, V10, V12, V6 Biodiesel, V6 Diesel, V6 Hybrid, V8 Biodiesel, V8 Diesel, W12.
+See STEP 7 in preprocessing for handling of these. 
+
+
+
+## EDA8 
+-Shows that anything less than (just over) 160 length is listed NOT high.
+```{r length_plot_and_distribution}
+EDA8<- ggplot(data = CarTrain,
+               aes(
+                 x = length,
+                 y = price_nom)) +
+  geom_point()
+EDA8
+
+lengthEDA <- ggplot(data =  CarTrain,
+                    aes(
+                      x= length
+                    )) +
+  geom_histogram()
+
+lengthEDA
+```
+We again see a normal distribution of data between around 160 - 220, and potentially a second distribution between 220 -260. This tells me there are likely two categories of vehicles for lengths. The second distribution may be commercial vehicles. We may do more preprocessing to confirm, or at least bean these into classes that will be more useful than continuous variables.
+See STEP 8 for preprocessing
+
+
+## EDA9 
+-----Shows that dual clutch transmissions do not list high.
+```{r}
+EDA9 <- ggplot(data = CarTrain,
+               aes(
+                 x = transmission,
+                 y = price_nom)) +
+  geom_point()
+EDA9
+
+str(CarTrain$transmission)
+CarTrain$transmission <- as.factor(CarTrain$transmission)
+str(CarTrain)
+
+summary(CarTrain$transmission)
+```
+Again we run into the issue of data.
+We DO NOT have enough data to support claims regarding dual clutch transmissions. 
+See STEP 9 preprocessing for how this was handled.
+
+*Interpretation*: During exploration, check for any missing or outlier values. For instance, you might find that some customers have missing data on their age or income. Explain this clearly: "Some rows are missing data, which could be due to customers opting not to provide this information."
+
+### Finally, let's ensure the overall integrity of data and list out the values that need cleaning for our variables of interest.
+```{r}
+CarTrainCondensed <- CarTrain %>%
+  select(vin,
+         horsepower,
+         power_hp,
+         year,
+         listing_color,
+         make_name,
+         daysonmarket,
+         frame_damaged,
+         engine_cylinders,
+         length,
+         transmission,
+         price_nom)
+```
+
+------------------------------------------------------------------------
+
+# 3. Data Preprocessing
+
+Perform data cleaning, such as handling missing values, transforming variables, or creating new features. Starting off let's explore the variables of potential interest as listed above for outliers or data errors
+## Step 1 'horsepower'
+Remove the non matching rows from horsepower column
+```{r}
+powerDF <- ComparisonDF %>%
+  filter(!near(difference,0))
+```
+The resulting dataframe shows 1292 observations where the horsepower does not match the power_hp
+Checking a handful one by one, it seems there are errors in the 'power_hp' column. The first vin I checked is '1B4GP44G1YB680822' and is listed online technically as 158 horsepower (horsepower) column. The next random VIN I selected is '1C6RRFFG8LN377095' listed also online as having 305 horsepower (horsepower column). Lets do a random 3rd one to see '1GC4YUE78LF123604' is listed online as 401 horsepower (power_hp column) This leads to an interesting dillemma. It seems that neither column is more accurate to their listings. The best option which may be beyond my abilities right now would be to verify all this information online through the VIN. I do not know any code to do this, and it would too time consuming to perform by hand. I will create a 3rd column to average the two together. The 'powerAVG' column will be used going forward. Depending on the source of this data, we could choose better which column to use in our data. For example, regardless what caused the discrepancies in the power columns, the decision of the consumer whether to purchase the vehicle at the asking price may be influenced by the power of the vehicle, but they can only make that decision based on the horsepower rating that they see.
+
+```{r}
+CarTrainCondensed <- CarTrain %>%
+  select(vin,
+         power_hp,
+         horsepower,
+         year,
+         listing_color,
+         make_name,
+         daysonmarket,
+         frame_damaged,
+         engine_cylinders,
+         length,
+         transmission,
+         wheel_system,
+         price_nom)
+
+
+
+CarTrainCondensed$powerAVG <- ( CarTrainCondensed$power_hp + CarTrainCondensed$horsepower ) /2 
+```
+
+The 'powerAVG' column will be used going forward.
+```{r}
+CarTrainCondensed <- CarTrainCondensed %>%
+  select(vin,
+         powerAVG,
+         year,
+         listing_color,
+         make_name,
+         daysonmarket,
+         frame_damaged,
+         engine_cylinders,
+         length,
+         transmission,
+         price_nom)
+rm(
+  ComparisonDF,
+  difference,
+  horsepowerC,
+  power_hpC
+)
+```
+
+Checking powerAVG
+```{r}
+str(CarTrainCondensed$powerAVG)
+sum(is.na(CarTrainCondensed$powerAVG))
+sum(CarTrainCondensed$powerAVG == "")
+sum(CarTrainCondensed$powerAVG == 0)
+```
+
+
+## Step 2 'year'
+Checking for any cleaning to the year.
+```{r}
+str(CarTrainCondensed$year)
+summary(CarTrainCondensed$year)
+sum(is.na(CarTrainCondensed$year))
+sum(CarTrainCondensed$year == "")
+sum(CarTrainCondensed$year == 0)
+```
+No actions taken, the column is fine.
+
+
+## Step 3 'listing_color'
+Checking 'listing_color'
+```{r}
+summary(CarTrainCondensed$listing_color)
+sum(is.na(CarTrainCondensed$listing_color))
+sum(CarTrainCondensed$listing_color == "")
+sum(CarTrainCondensed$listing_color == 0)
+```
+
+
+## Step 4 'make_name'
+Checking make_name
+```{r}
+summary(CarTrainCondensed$make_name)
+sum(is.na(CarTrainCondensed$make_name))
+sum(CarTrainCondensed$make_name == "")
+
+```
+
+
+
+## Step 5 'daysonmarket'
+Checking daysonmarket
+```{r}
+str(CarTrainCondensed$daysonmarket)
+summary(CarTrainCondensed$daysonmarket)
+sum(is.na(CarTrainCondensed$daysonmarket))
+sum(CarTrainCondensed$daysonmarket == "")
+sum(CarTrainCondensed$daysonmarket == 0)
+```
+
+
+## Step 6 'frame_damaged'
+Checking frame_damaged
+```{r}
+str(CarTrain$frame_damaged)
+summary(CarTrainCondensed$frame_damaged)
+sum(is.na(CarTrainCondensed$frame_damaged)) #not seeing them as NA
+sum(CarTrainCondensed$frame_damaged == "") #there it is, they are recognized as blank
+
+CarTrainCondensed$frame_damaged <- (CarTrainCondensed$frame_damaged)
+CarTrainCondensed$frame_damaged[CarTrainCondensed$frame_damaged == "" ] <- NA
+
+str(CarTrainCondensed$frame_damaged)
+
+levels(CarTrainCondensed$frame_damaged) <- c(levels(CarTrainCondensed$frame_damaged), "UNK")
+
+CarTrainCondensed$frame_damaged[is.na(CarTrainCondensed$frame_damaged)] <- "UNK"
+
+str(CarTrainCondensed$frame_damaged)
+```
+We have 4421 observations missing a True or False. We created a new level to the categorical variable of 'frame_damaged.' It used to only have the options of True or False for, but now the value can be either True, False, or UNK. UNK indicates the value was missing in the original data.
+
+
+
+## Step 7 'engine_cylinders'
+Checking Engines
+```{r}
+str(CarTrainCondensed$engine_cylinders)
+summary(CarTrainCondensed$engine_cylinders)
+sum(is.na(CarTrainCondensed$engine_cylinders))
+sum(CarTrainCondensed$engine_cylinders == "")
+```
+118 values are missing in the 'engine_cylinders' column.
+
+Let's see those observations in isolation
+```{r}
+MissingEngineValues <- CarTrain %>%
+  filter(engine_cylinders == "")
+head(MissingEngineValues)
+```
+
+Let's compare these with other columns that may be missing because I did the variable selection too early. We might find information for this column in another column.
+```{r}
+MissingEngineValuesFull <- inner_join(x= MissingEngineValues,
+                                      y= CarTrain,
+                                      by= 'vin')
+head(MissingEngineValuesFull)
+```
+We again have a couple of options for handling these values. We could remove them completely because they compose only
+```{r}
+loss <- 100* nrow(MissingEngineValues) / nrow(CarTrain)
+loss
+```
+percent of the data. This is within acceptable tolerances for dataloss. These entries also show missing entries for their engine_type. This could be useful information in our models. We will instead, again imbue a new level, that level is "UNK."
+```{r}
+str(CarTrainCondensed$engine_cylinders)
+CarTrainCondensed$engine_cylinders <- as.character(CarTrainCondensed$engine_cylinders)
+sum(CarTrainCondensed$engine_cylinders == "")
+
+
+CarTrainCondensed$engine_cylinders[CarTrainCondensed$engine_cylinders == ""] <- "UNK"
+
+CarTrainCondensed$engine_cylinders <- as.factor(CarTrainCondensed$engine_cylinders)
+
+levels(CarTrainCondensed$engine_cylinders)
+
+summary(CarTrainCondensed$engine_cylinders)
+```
+We will continue forward with updated column.
+
+
+
+## Step 8 'length'
+Checking length
+```{r}
+str(CarTrainCondensed$length)
+summary(CarTrainCondensed$length)
+sum(is.na(CarTrainCondensed$length))
+sum(CarTrainCondensed$length == "")
+sum(CarTrainCondensed$length == 0)
+```
+
+
+
+## Step 9 'transmission'
+checking transmission
+```{r}
+str(CarTrainCondensed$transmission)
+sum(is.na(CarTrainCondensed$transmission))
+sum(CarTrainCondensed$transmission == "")
+```
+We have 158 missing values for transmission.
+
+lets imbue an other column of "UNK"
+```{r}
+str(CarTrainCondensed$transmission)
+CarTrainCondensed$transmission <- as.character(CarTrainCondensed$transmission)
+str(CarTrainCondensed$transmission)
+CarTrainCondensed$transmission[is.na(CarTrainCondensed$transmission)] <- "UNK"
+
+CarTrainCondensed$transmission <- as.factor(CarTrainCondensed$transmission)
+levels(CarTrainCondensed$transmission)
+summary(CarTrainCondensed$transmission)
+```
+
+# Final Cleanup Before Modeling
+```{r}
+CarTrainCondensed <- CarTrainCondensed %>%
+  select(-'vin')
+str(CarTrainCondensed)
+CarTrainCondensed <- CarTrainCondensed %>%
+  mutate(across(
+    c(year,
+      listing_color,
+      make_name,
+      frame_damaged,
+      transmission,
+      price_nom),as.factor
+  ))
+str(CarTrainCondensed)
+sum(is.na(CarTrainCondensed))
+```
+
+# Variable Selection Explanation
+Going through the variables selected we explain why we chose the variables we did:
+Domain/Business Knowledge: Vehicle horsepower('PowerAVG')- Horsepower is an important factor to consumers
+                           Year- Vehicles depreciate and demand decreases as they age
+                           Color ('listing_color')- Some colors are much less popular (lower demand)
+                           Days on Market- As a vehicle sits, it's COGS increases, this increases seller incentive to take lower offers from buyers.
+                           Frame Damaged- Damaged frames can push consumers away when looking to purchase a vehicle
+                           Transmission- As automatic transmissions rival their manual counterparts for efficiency, they become more popular and supply increases, this will augment the current market equilibrium.
+Statistical Correlation: The year plot shows older vehicles never sell high.
+                         The color plot shows certain colors as not selling high
+                         Some brands retain value as they age and some are more valuable new
+                         Engine Cylinders- Certain engine types have higher or lower demand
+
+------------------------------------------------------------------------
+
+# 4. Training-Validation Split
+
+Split the data into training and validation sets to evaluate the model's performance.
+
+```{r}
+set.seed(42)
+TrainTestSplit <- initial_split(CarTrainCondensed,
+                                prop = 7/10)
+
+TrainData <- training(TrainTestSplit)
+
+write.csv(TrainData,
+          file = '/Users/renebergeron/Documents/R/Project1/TrainDataSplit.csv')
+
+
+ValiData <- testing(TrainTestSplit)
+
+write.csv(ValiData,
+          file =  '/Users/renebergeron/Documents/R/Project1/ValiDataSplit.csv')
+```
+
+*Interpretation*: We split the data into two groups. A larger group for training the model. This is like showing the model the answers and saying "find patterns and correlations." The validation data is then used without showing the model the answers so it can apply its predicitions to the data. You then compare the answers you have with the predictions to determine how effective our model is at predicting before we choose which model and deploy it. 
+
+------------------------------------------------------------------------
+
+
+# 5. Model 1 kNN
+
+## First we need to normalize the data because we are kNN needs normalized values
+```{r}
+normalized <- preProcess(TrainData[,c(1,5,8)],
+                            method = c(
+                              "center",
+                              "scale"
+                            ))
+ 
+
+NormTrain <- predict(normalized,
+                     newdata = TrainData)
+
+```
+
+
+
+## 5.1 Model 1 Predictions
+
+Train Model 1 and generate predictions on the validation data.
+```{r}
+kNNmodel3 <- caret::knn3(price_nom ~ .,
+                         data = NormTrain,
+                         k= 3)
+str(TrainData)
+kNNpredictions3train <- predict(kNNmodel3,
+                           newdata = NormTrain[,
+                                               -c(10)],
+                           type = 'class')
+
+```
+
+
+
+*Interpretation*: Our model is now predicting whether or not a car should be priced high or not based on the following features:
+-Horsepower
+-Year
+-Listing color
+-Make
+-Days on Market
+-Frame Damage
+-Engine configuration
+-Vehicle length
+-Transmission type
+
+
+------------------------------------------------------------------------
+
+## 5.2 Model 1 Evaluation
+
+Evaluate Model 1 using appropriate metrics (e.g., accuracy, ROC, confusion matrix).
+
+```{r}
+k3ConfusionTrain <- confusionMatrix(data = kNNpredictions3train,
+                                    reference = NormTrain[,c(10)],
+                                    positive = "1",
+                                    mode = "everything")
+
+k3ConfusionTrain
+```
+This data is skewed towards the negative class and if the model had no information, it would guess the majority class (not priced high). Guessing the majority class, you would have a 87.9% chance of getting it correct. The model's accuracy is 96%. That means  this model has a 8.1% higher chance of correctly predicting whether a vehicle is priced high or not. As expected (because of how skewed the data is towards not high), the model is less accurate at predicting when vehicles are priced high (80.4%). The model is better at predicting the majority (not priced high) class (98.1%). 
+This model has few limitations. In business terms this model could lead to potential missed opportunities. The 80.4% for sensitivity means that the model correctly predicts 81.3% of the positive class. Since the positive class this means that you may be missing opportunities for pricing a vehicle high. As an operator, you need to consider whether the potential for lost income by not pricing a vehicle high outweighs the cost of holding that vehicle for longer. Since this model has 98.1% specificity, it will only incorrectly predict the negative class (meaning you may overprice a vehicle) 2% of the time.
+
+
+
+### Next we look at the validation data.
+Remember that this is data we separated from the original dataset so that we could do exactly this (test the model's effectiveness with data it has not seen before). We are using the model we built on the training data and have analyzed its performance to make predictions on the data we haven't shown to the model.
+```{r}
+NormValid <- predict(normalized,
+                     newdata = ValiData)
+
+kNNpredictions3valid<- predict(kNNmodel3,
+                                newdata = NormValid[,
+                                                    -c(10)],
+                               type = "class")
+```
+
+Now we compare the predictions of the model with the results provided by the data.
+
+```{r}
+k3ConfusionValid <- confusionMatrix(data = kNNpredictions3valid,
+                                    reference = NormValid[,
+                                                          c(10)],
+                                    positive = "1")
+k3ConfusionValid
+```
+
+So in practice, this model is tests worse than the training model by a lot. The ability to predict high priced vehicles is now only 60.5%. The total accuracy did not decrease very much, it dropped to 92.3% which is still better than guessing the majority class which in this split composes 88.9% of the observations. This model is still much better at predicting when a car is not priced high. My recommendations remain the same as stated for the training set. If your goals are to maximize revenue per vehicle, I recommend this model be adjusted or a different model be created.
+
+This is an ROC curve, it shows the tradeoff in the model between True positive preditions and false positive predictions. What this means in terms of this model is the trade-off between correctly pricing a vehicle high vs incorrectly pricing a vehicle high. 
+```{r}
+kNNprobabilities3valid <- predict(kNNmodel3,
+                                  newdata = NormValid[,
+                                                      -c(10)],
+                                  type = "prob")
+
+kNN3probPositive <- kNNprobabilities3valid[,"1"]
+
+k5ROC <- roc(response = NormValid$price_nom,
+             predictor = kNNprobabilities3valid[,"1"])
+
+plot(k5ROC)
+k5ROC$auc
+```
+The darker line in the plot represents the tradeoff in the model at different probability thresholds. In more clear terms, it's as if you were to adjust the minimum probability needed for the model to predict that the vehicle should be priced high. By default and as set currently in the model, the threshold is 50%. This means that if the model determines the probability to be priced high as higher than 50%, it will be classified as high priced. If you change that threshold to let's say 75%, the vehicle would need a probability of 75% or more to be classified as priced high. The Area Under the Curve (AUC) is .886. This is the overall efficacy of the model. 1.0 would be perfect predictions every time. .5 would instead be the same as flipping a coin to predict.  
+
+Lets try the same type of model, but with more neighbor references points to hopefully help the prediction
+Training:
+```{r}
+kNNmodel5 <- caret::knn3(price_nom ~. ,
+                         data = NormTrain,
+                         k=5)
+
+kNNpredictions5train <- predict(kNNmodel5,
+                                newdata = NormTrain[,
+                                                    -c(10)],
+                                type = "class")
+
+k5ConfusionTrain <- confusionMatrix(data = kNNpredictions5train,
+                                    reference = NormTrain[,
+                                                     c(10)])
+k5ConfusionTrain
+```
+This one shows a lower accuracy than the first model which used the three nearest neighbors instead of this one which uses 5.
+
+Validation:
+```{r}
+kNNpredictions5valid <- predict(kNNmodel5,
+                                newdata = NormValid[,
+                                                    -c(10)],
+                                type = "class")
+
+k5ConfusionValid <- confusionMatrix(data = kNNpredictions5valid,
+                                    reference = NormValid[,
+                                                          c(10)],
+                                    positive = "1")
+k5ConfusionValid
+```
+The kNN model did not get better by increasing the number of neighbors. For example, the model may have a slightly higher accuracy (.06%), but the accuracy for predicting high priced vehicles went down. However, if you are looking for a model to aid efficient inventory management (not holding vehicles longer than needed) this model will help by ensuring you dont overprice vehicles. This is indicated by the specificity of 96.5%. For inventory efficiency this means that only 3.5% of cars would be overpriced. Compared to the 94.9% negative predictive value that shows you would be underpricing 5.1% of vehicles. As a business owner, you need to consider whether you will be losing more money on stagnant inventory or losses are higher when the car is under priced.
+
+
+*Interpretation*: Explain the evaluation metrics in simple language: "We used accuracy to see how often our model predicts the correct outcome. The higher the accuracy, the better the model. We also used a confusion matrix to check how often the model made correct predictions versus incorrect ones."
+
+------------------------------------------------------------------------
+
+
+# 6. Model 2 Decision Tree
+## Build Full Decision Tree 
+
+```{r}
+library(rpart)
+library(rpart.plot)
+
+DecisionTreeModel <- rpart(
+  price_nom ~ powerAVG +
+               year +
+               listing_color +
+               make_name +
+               daysonmarket +
+               frame_damaged +
+               engine_cylinders +
+               length +
+               transmission,
+               data = TrainData,
+  method = "class",
+  control = rpart.control(cp = 0.001, minsplit = 20, xval = 10)
+)
+
+summary(DecisionTreeModel)
+rpart.plot(DecisionTreeModel)
+```
+
+*Interpretation* 
+The baseline tree fits clear, business-sensible rules: vehicles with lower mileage, newer model years, and larger powertrain/size markers flow toward the HIGH leaf nodes, while older, high-mileage, and smaller vehicles tend toward LOW. The printed split list shows these variables appearing early and repeatedly, which signals they’re carrying most of the predictive weight. Surrogate splits appearing on related specs indicate the tree found multiple, correlated ways to separate the same buyer value signal.
+
+## Prune the Tree 
+
+```{r}
+best_cp <- DecisionTreeModel$cptable[which.min(DecisionTreeModel$cptable[,"xerror"]), "CP"]
+
+PrunedTree <- prune(DecisionTreeModel, cp = best_cp)
+
+rpart.plot(PrunedTree,
+           main = "Pruned Decision Tree for Car Price Classification",
+           extra = 104)
+```
+
+*Interpretation*
+The pruned tree is now readable and business-useful: the top split(s) segment vehicles into broad buckets, while deeper branches refine edge cases with structural features like wheelbase/length/height and market signals like daysonmarket. Paths that combine older year with high mileage and shorter dimensions consistently terminate in LOW leaves. Pruning keeps these stable, high-signal paths and removes small, noisy branches, improving generalization for your validation set and the holdout test file.
+
+## Evaluate Accuracy on Validation Data 
+
+```{r}
+DT_Predictions <- predict(PrunedTree,
+                          newdata = ValiData,
+                          type = "class")
+
+DT_Predictions <- factor(DT_Predictions)
+Vali_Actual <- factor(ValiData$price_nom)
+
+DT_Predictions <- droplevels(DT_Predictions)
+Vali_Actual <- droplevels(Vali_Actual)
+
+common_levels <- sort(union(levels(Vali_Actual), levels(DT_Predictions)))
+
+DT_Predictions <- factor(DT_Predictions, levels = common_levels)
+Vali_Actual <- factor(Vali_Actual, levels = common_levels)
+
+confMatrix <- confusionMatrix(
+  data = DT_Predictions,
+  reference = Vali_Actual
+)
+
+confMatrix
+```
+
+*Interpretation*
+On the holdout (validation) data, the confusion matrix indicates the model is reliably catching LOW-priced cars (strong specificity), while sensitivity to HIGH varies with how tight those top splits are. This pattern is expected when HIGH cars are rarer and defined by stacked conditions. Overall accuracy is solid for a single interpretable model; errors concentrate in borderline vehicles (mid-mileage, mid-year, or mixed size/power signals) where even humans would disagree. If your business goal is to avoid missing HIGH cars, you could raise the HIGH probability cutoff; if you want fewer false HIGHs, keep the default cutoff.
+
+## Variable Importance 
+
+```{r}
+importance <- PrunedTree$variable.importance
+importance <- sort(importance, decreasing = TRUE)
+
+barplot(
+  importance,
+  main = "Variable Importance (Decision Tree)",
+  col = "steelblue",
+  las = 2)
+```
+
+*Interpretation*
+The tree encodes intuitive rules of the used-car market: newer, lower-mileage, higher-cylinder, larger-frame vehicles skew HIGH; older, higher-mileage, smaller-frame vehicles skew LOW; and daysonmarket helps resolve ambiguous cases. Because the model is pruned, it communicates these rules clearly and generalizes reasonably well. To push performance, we could: (1) tune cp with the 1-SE rule if you want an even simpler tree, (2) compare against logistic regression (for calibration) and random forest/GBM (for accuracy lift), and (3) adjust the probability cutoff to match your cost of false HIGH vs. false LOW in pricing decisions.
+
+# Model 3: "Log Regression Project Alt 1"
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+summary(cars)
+```
+ 
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r}
+# 5) (Optional) drop ultra-rare levels again, now within TRAIN, to stabilize
+if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
+if (!requireNamespace("forcats", quietly = TRUE)) install.packages("forcats")
+
+# Load every time you start a fresh session / knit
+library(dplyr)
+library(forcats)
+
+TrainData <- TrainData %>%
+  mutate(across(where(is.factor), ~ fct_lump_min(.x, min = 10, other_level = "Other")))
+# mirror TRAIN levels to VALIDATION
+for (col in setdiff(names(TrainData)[sapply(TrainData, is.factor)], "price_nom")) {
+  ValiData[[col]] <- factor(as.character(ValiData[[col]]), levels = levels(TrainData[[col]]))
+}
+```
+To run the analysis smoothly, the code checks for and installs necessary R packages, then uses them to simply the training data by grouping rare categories (those occuring less than ten times) in every categorical column into a single level called "Other," which stabilizes the predictive model.
+
+The following loop aligns the factor levels in the validation data with those in the training data. It does this by converting each categorical column to have the same possible categories as the training dataset. This step is important because models can fail or misclassify if the category levels in the validation data to do not match those used during training.
+```{r}
+# 6) Ensure reference level so glm’s type="response" returns P(HIGH)
+#    (glm returns P(not reference); set reference = "LOW")
+if (all(c("LOW","HIGH") %in% levels(TrainData$price_nom))) {
+  TrainData$price_nom <- relevel(TrainData$price_nom, ref = "LOW")
+  ValiData$price_nom  <- factor(ValiData$price_nom, levels = levels(TrainData$price_nom))
+}
+```
+This section ensures that the reference level for the target variable price_nom is set to "LOW." In logistic regression, the model predicts the probability of not being in the reference class. Therefore, by setting "LOW" as the reference, the model's predicitions (type = "response") will represent the probability of being "HIGH." It also ensures that the validation data has the same ording of levels for consistency.
+```{r}
+# 7) Fit logistic regression
+mod_glm <- glm(price_nom ~ ., data = TrainData, family = binomial())
+summary(mod_glm)
+str(TrainData)
+```
+The command glm(price_nom ~ ., data = TrainData, family = binominal()) builds a logistic regression model to predict the probability of an item's price being "HIGH" versus not based on all other available variables in the training data, with the resulting coefficients indicating whether each predictor increases(positive) or decreases (negative) the odds of a "HIGH" price, and the summary provides statistics like p-values to assesses each predictor's significance. 
+
+The model fit is significantly better than the baseline model, as shown by the large drop in deviance(from 5416.7 to 2145.9), and the AIC of 2279.9 provides a metric for future model comparisons, though it's important to note that 110 observations were excluded due to missing data during the fitting process.
+```{r}
+# 8) Predict & classify (threshold = 0.5; you can tune this later)
+vali_prob_glm <- predict(mod_glm, newdata = ValiData, type = "response")
+pos_label <- setdiff(levels(TrainData$price_nom), levels(TrainData$price_nom)[1])[1]  # typically "HIGH"
+neg_label <- levels(TrainData$price_nom)[1]                                           # typically not high
+pred_glm  <- ifelse(vali_prob_glm >= 0.5, pos_label, neg_label)
+pred_glm  <- factor(pred_glm, levels = levels(ValiData$price_nom))
+```
+The process calculates the probability of a "HIGH" price for each item in the validation data using the trained model, then converts these probabilities to "HIGH" or "LOW" predications by applying a standard 0.5 threshold (which can be adjusted later), making the predictions directly comparable to the actual outcomes for performance evalution.
+
+Evaluat: The logistic regression model achieved an AUC of 0.961, indicating excellent predicitive performance. This means the model can correctly distinguish between HIGH and LOW cases about 96% of the time, showing strong accuracy and relaibility in classifying outcomes.
+```{r}
+# 9) Evaluate
+cm_glm <- caret::confusionMatrix(pred_glm, ValiData$price_nom)
+cm_glm
+
+ValiData$price_nom <- droplevels(ValiData$price_nom)
+roc_glm <- pROC::roc(response = ValiData$price_nom,
+                     predictor = as.numeric(vali_prob_glm),
+                     levels   = c(neg_label, pos_label))  # controls=LOW, cases=HIGH
+auc_glm <- pROC::auc(roc_glm); auc_glm
+plot(roc_glm, main = sprintf("Logistic Regression ROC (AUC = %.3f)", auc_glm))
+```
+------------------------------------------------------------------------
+
+# 7. Final Prediction
+## Build a PreProcess function
+```{r}
+PreProcessFN <- function(df_raw) {
+  #1 selecting columns used in original processing
+  df_processed <- df_raw %>%
+    select("vin", 
+           "horsepower", 
+           "power_hp", 
+           "year", 
+           "listing_color", 
+           "make_name", 
+           "daysonmarket", 
+           "frame_damaged",
+           "engine_cylinders", 
+           "length", 
+           "transmission")
+  #2 creating powerAVG
+  df_processed <- df_processed %>%
+    mutate( powerAVG =
+              (power_hp + horsepower) / 2 ) %>%
+    select(-horsepower,
+           -power_hp)
+  #3 removing blanks from frame damage
+  df_processed$frame_damaged[df_processed$frame_damaged == ""] <- "UNK"
+  
+  #4 removing blanks from the engine_cylinders
+  df_processed$engine_cylinders[df_processed$engine_cylinders == ""] <- "UNK"
+  
+  #5 removing blanks from transmission
+  df_processed$transmission[df_processed$transmission == ""] <- "UNK"
+  
+  #6 Final Cleanup and Formatting
+  df_processed <- df_processed %>%
+    mutate(
+      across(
+        c(year,
+          listing_color,
+          make_name,
+          frame_damaged,
+          engine_cylinders,
+          transmission),
+      as.factor
+      )
+    ) %>%
+    select(powerAVG,
+           year,
+           listing_color,
+           make_name,
+           daysonmarket,
+           frame_damaged,
+           engine_cylinders,
+           length,
+           transmission)
+  return(df_processed)
+}
+```
+
+Combine the results from Model 1 and Model 2 to make a final prediction or decision.
+## Load data
+```{r}
+deployData <- read.csv("car_test_wi_29.csv")
+str(deployData)
+ProcessedDeployment <- PreProcessFN(deployData)
+str(ProcessedDeployment)
+```
+
+
+
+## Predict Decision Tree
+```{r}
+DecisionTreeDeploymentPredictions <- predict(DecisionTreeModel,
+                                             ProcessedDeployment,
+                                             type = "class")
+DecisionTreeDeploymentPredictions
+```
+
+## Predict Logistic Regression Tree
+```{r}
+predployregression <- predict(mod_glm,
+                              newdata = ProcessedDeployment,
+                              type = "response")
+predployregression
+pos_label <- setdiff(levels(TrainData$price_nom), levels(TrainData$price_nom)[1])[1]  # typically "HIGH"
+neg_label <- levels(TrainData$price_nom)[1]                                           # typically not high
+pred_glm  <- ifelse(predployregression >= 0.5, pos_label, neg_label)
+pred_glm  <- factor(pred_glm, levels = levels(ValiData$price_nom))
+pred_glm
+```
+
+*Interpretation*: Describe how you combine the models' results and what the final prediction means: "By combining the predictions from both models, we have a stronger prediction. This final model provides a recommendation on whether a customer will make a purchase, based on all available data."
+
+------------------------------------------------------------------------
+
+
+#Limitations
+Since the data are limited, we cannot guarantee the accuracy of predictions that are outside of the following:
+-Horsepower 101-760 hp
+-Year 1991-2020
+-Length 139.6-266.2
+-Transmissions: -Automatic
+                -CVT
+                -Dual Clutch
+                -Manual
+
+Targeting whether to price a vehicle high or not high.
+
+
+
+
+
+
